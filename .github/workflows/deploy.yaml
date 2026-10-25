@@ -1,0 +1,95 @@
+name: Build and deploy rotator
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: read the repo, and mint an OIDC token for WIF.
+permissions:
+  contents: read
+  id-token: write
+
+# Never run two deploys at once; queue instead of cancelling mid-deploy.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: shriramblue
+  REGION: europe-west1
+  # terraform output wif_provider_name
+  WIF_PROVIDER: projects/242762429775/locations/global/workloadIdentityPools/github-actions-pool-dev/providers/github-provider-dev
+  # terraform output cicd_service_account_email
+  DEPLOY_SA: sa-cicd-deployer@shriramblue.iam.gserviceaccount.com
+  REGISTRY: europe-west1-docker.pkg.dev
+  IMAGE: europe-west1-docker.pkg.dev/shriramblue/rotator-repo/rotator
+  JOB_NAME: postgres-password-rotator-dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # Third-party actions are pinned to full commit SHAs (tags are mutable).
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Step 1: keyless auth via Workload Identity Federation.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      # Step 2: let Docker push to Artifact Registry using the WIF credentials.
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGISTRY}" --quiet
+
+      # Step 3: build once, tag with the commit SHA (traceable) and latest.
+      - name: Build image
+        run: |
+          docker build \
+            --pull \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" \
+            .
+
+      - name: Push image
+        id: push
+        run: |
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")"
+          echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "Pushed ${digest}"
+
+      # Step 4: point the job at the exact digest just pushed, so what runs is
+      # immutable even if "latest" moves later.
+      - name: Update Cloud Run Job
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          gcloud run jobs update "${JOB_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${IMAGE_REF}" \
+            --quiet
+
+      - name: Summary
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          {
+            echo "### Deployed ${JOB_NAME}"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Image: \`${IMAGE_REF}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

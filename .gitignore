@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local/personal variable files. terraform/terraform.tfvars holds the shared,
+# non-secret dev config and stays committed.
+*.tfvars
+*.tfvars.json
+!terraform/terraform.tfvars
+
+# Keep the provider lock file so every run uses the same provider versions.
+!.terraform.lock.hcl
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+.env
+
+# ---------------------------------------------------------------------------
+# IDE & OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store

@@ -1,3 +1,6 @@
 google-cloud-secret-manager==2.22.0
 pg8000==1.31.2
+# pg8000 only requires scramp>=1.4.5; scramp 1.5.0 removed make_channel_binding,
+# which pg8000 calls on SSL connections. Pin to the last compatible release.
+scramp==1.4.17
 google-auth==2.29.0

@@ -300,8 +300,15 @@ resource "google_cloud_run_v2_job" "rotator" {
     }
   }
 
-  # CI/CD owns the image after the first apply; don't roll it back.
   lifecycle {
+    # The job connects over the VPC connector, so the instance must have a
+    # private IP; fail the plan instead of deploying with DB_PRIVATE_IP="".
+    precondition {
+      condition     = data.google_sql_database_instance.target.private_ip_address != ""
+      error_message = "Cloud SQL instance ${var.sql_instance_name} has no private IP. Enable private IP on network ${var.vpc_network} first."
+    }
+
+    # CI/CD owns the image after the first apply; don't roll it back.
     ignore_changes = [
       template[0].template[0].containers[0].image,
       client,

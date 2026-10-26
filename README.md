@@ -11,7 +11,7 @@ password as a new version of that user's secret. Applications that read the
 | Item | Value (dev) |
 | --- | --- |
 | GCP project | `ingka-dp-sap-dev` (`europe-west1`) |
-| Cloud SQL instance | `staging-database` (PostgreSQL 16) |
+| Cloud SQL instance | `testsergio` (PostgreSQL 16) |
 | Rotated users → secrets | `postgres` → `postgres_pwd`, `int_mdm_012` → `int_mdm_012_pwd`, `int_mdm_013` → `int_mdm_013_pwd`, `int_mdm_016` → `int_mdm_016_pwd` |
 | Cloud Run Job | `postgres-password-rotator-dev` |
 | Schedule | `0 0 1 */4 *` UTC (1 Jan, 1 May, 1 Sep) |
@@ -49,8 +49,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
 ## Local setup
 
 ```sh
-git clone https://github.com/ingka-group-digital/p2p-postgrespwd-ratator.git
-cd p2p-postgrespwd-ratator
+git clone https://github.com/ingka-group-digital/p2p-postgrespwd-rotator.git
+cd p2p-postgrespwd-rotator
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -70,11 +70,11 @@ over the public IP instead (it encrypts the connection itself):
 
 ```sh
 # Terminal 1: proxy to localhost:5432
-cloud-sql-proxy ingka-dp-sap-dev:europe-west1:staging-database --port 5432
+cloud-sql-proxy ingka-dp-sap-dev:europe-west1:testsergio --port 5432
 
 # Terminal 2
 export PROJECT_ID=ingka-dp-sap-dev
-export INSTANCE_CONNECTION_NAME=ingka-dp-sap-dev:europe-west1:staging-database
+export INSTANCE_CONNECTION_NAME=ingka-dp-sap-dev:europe-west1:testsergio
 export DB_PRIVATE_IP=127.0.0.1
 export DB_SSL_MODE=disable          # proxy already encrypts
 export DB_ADMIN_SECRET=postgres_pwd # password used to connect as postgres
@@ -151,8 +151,8 @@ gcloud storage buckets update gs://p2p-postgrespwd-tfstate-dev --versioning
 
 Also required, and not created by Terraform:
 
-- Cloud SQL instance `staging-database` with a **private IP** on the `default`
-  VPC (Private Services Access set up on that network).
+- Cloud SQL instance `testsergio` with a **private IP** on the
+  `ingka-dp-vpc-1` VPC (Private Services Access set up on that network).
 - Secrets `postgres_pwd`, `int_mdm_012_pwd`, `int_mdm_013_pwd`,
   `int_mdm_016_pwd`, each holding that user's **current** password.
 - On PostgreSQL 16, for each `int_mdm_*` user:

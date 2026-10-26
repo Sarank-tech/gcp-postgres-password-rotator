@@ -27,7 +27,7 @@ variable "environment" {
 variable "sql_instance_name" {
   description = "Name of the existing Cloud SQL for PostgreSQL instance whose users are rotated."
   type        = string
-  default     = "staging-database"
+  default     = "testsergio"
 }
 
 variable "user_secret_mappings" {
@@ -51,7 +51,7 @@ variable "github_repository" {
 
   validation {
     condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
-    error_message = "github_repository must be in the form \"<org>/<repo>\", e.g. \"ingka-group-digital/p2p-postgrespwd-ratator\"."
+    error_message = "github_repository must be in the form \"<org>/<repo>\", e.g. \"ingka-group-digital/p2p-postgrespwd-rotator\"."
   }
 }
 
@@ -100,7 +100,7 @@ variable "cicd_project_roles" {
 variable "vpc_network" {
   description = "VPC network the Cloud SQL private IP lives on."
   type        = string
-  default     = "default"
+  default     = "ingka-dp-vpc-1"
 }
 
 variable "vpc_connector_cidr" {

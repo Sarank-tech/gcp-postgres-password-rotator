@@ -25,7 +25,7 @@ flowchart LR
         SCH[Cloud Scheduler<br/>0 0 1 */4 *]
         JOB[Cloud Run Job<br/>postgres-password-rotator-dev]
         VPCC[Serverless VPC<br/>Access connector]
-        SQL[(Cloud SQL<br/>staging-database<br/>private IP)]
+        SQL[(Cloud SQL<br/>testsergio<br/>private IP)]
         SM[(Secret Manager<br/>*_pwd secrets)]
     end
     GA -- OIDC token --> WIF
@@ -139,7 +139,7 @@ On each execution:
 
 | Service account | Used by | Permissions |
 | --- | --- | --- |
-| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/p2p-postgrespwd-ratator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
+| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/p2p-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
 | `sa-db-rotator-dev` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only |
 | `sa-rotator-scheduler-dev` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
@@ -156,10 +156,10 @@ Notes:
 
 | Dependency | Purpose | Managed by |
 | --- | --- | --- |
-| Cloud SQL `staging-database` | Target database; reached on private IP from `default` VPC; server only accepts encrypted connections | **Not** Terraform (data source only) |
+| Cloud SQL `testsergio` | Target database; reached on private IP from `ingka-dp-vpc-1` VPC; server only accepts encrypted connections | **Not** Terraform (data source only) |
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
-| Serverless VPC Access connector `pg-rotator-conn-dev` | Gives the job a path into `default` VPC (`10.8.0.0/28`, egress `PRIVATE_RANGES_ONLY`) | Terraform |
-| Private Services Access on `default` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
+| Serverless VPC Access connector `pg-rotator-conn-dev` | Gives the job a path into `ingka-dp-vpc-1` VPC (`10.8.0.0/28`, egress `PRIVATE_RANGES_ONLY`) | Terraform |
+| Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
 | Artifact Registry `rotator-repo` | Image storage; keeps 10 newest, deletes others after 30 days | Terraform |
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |

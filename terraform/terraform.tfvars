@@ -1,9 +1,9 @@
-project_id        = "shriramblue"
+project_id        = "ingka-dp-sap-dev"
 region            = "europe-west1"
 environment       = "dev"
 sql_instance_name = "staging-database"
 
-github_repository = "Sarank-tech/gcp-postgres-password-rotator"
+github_repository = "ingka-group-digital/p2p-postgrespwd-ratator"
 
 user_secret_mappings = {
   "postgres"    = "postgres_pwd"

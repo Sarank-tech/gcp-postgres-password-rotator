@@ -10,12 +10,12 @@ password as a new version of that user's secret. Applications that read the
 
 | Item | Value (dev) |
 | --- | --- |
-| GCP project | `shriramblue` (`europe-west1`) |
+| GCP project | `ingka-dp-sap-dev` (`europe-west1`) |
 | Cloud SQL instance | `staging-database` (PostgreSQL 16) |
 | Rotated users → secrets | `postgres` → `postgres_pwd`, `int_mdm_012` → `int_mdm_012_pwd`, `int_mdm_013` → `int_mdm_013_pwd`, `int_mdm_016` → `int_mdm_016_pwd` |
 | Cloud Run Job | `postgres-password-rotator-dev` |
 | Schedule | `0 0 1 */4 *` UTC (1 Jan, 1 May, 1 Sep) |
-| Image | `europe-west1-docker.pkg.dev/shriramblue/rotator-repo/rotator` |
+| Image | `europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator` |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
 
@@ -26,7 +26,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
   and `google-cloud-secret-manager`.
 - **Docker**: `python:3.11-slim` image, runs as a non-root user.
 - **Terraform** (`hashicorp/google ~> 5.0`): all GCP infrastructure, state in
-  GCS bucket `shriramblue-tfstate-dev`.
+  GCS bucket `p2p-postgrespwd-tfstate-dev`.
 - **GitHub Actions**: builds and deploys on every push to `main`, authenticating
   through Workload Identity Federation (no service account keys).
 
@@ -35,19 +35,19 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
 - Python 3.11+
 - Docker
 - Terraform >= 1.5
-- Google Cloud SDK (`gcloud`), authenticated with access to `shriramblue`:
+- Google Cloud SDK (`gcloud`), authenticated with access to `ingka-dp-sap-dev`:
 
   ```sh
   gcloud auth login
   gcloud auth application-default login
-  gcloud config set project shriramblue
+  gcloud config set project ingka-dp-sap-dev
   ```
 
 ## Local setup
 
 ```sh
-git clone https://github.com/Sarank-tech/gcp-postgres-password-rotator.git
-cd gcp-postgres-password-rotator
+git clone https://github.com/ingka-group-digital/p2p-postgrespwd-ratator.git
+cd p2p-postgrespwd-ratator
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -67,11 +67,11 @@ over the public IP instead (it encrypts the connection itself):
 
 ```sh
 # Terminal 1: proxy to localhost:5432
-cloud-sql-proxy shriramblue:europe-west1:staging-database --port 5432
+cloud-sql-proxy ingka-dp-sap-dev:europe-west1:staging-database --port 5432
 
 # Terminal 2
-export PROJECT_ID=shriramblue
-export INSTANCE_CONNECTION_NAME=shriramblue:europe-west1:staging-database
+export PROJECT_ID=ingka-dp-sap-dev
+export INSTANCE_CONNECTION_NAME=ingka-dp-sap-dev:europe-west1:staging-database
 export DB_PRIVATE_IP=127.0.0.1
 export DB_SSL_MODE=disable          # proxy already encrypts
 export DB_ADMIN_SECRET=postgres_pwd # password used to connect as postgres
@@ -126,7 +126,7 @@ terraform apply
 
 ```sh
 gcloud run jobs execute postgres-password-rotator-dev \
-  --region=europe-west1 --project=shriramblue --wait
+  --region=europe-west1 --project=ingka-dp-sap-dev --wait
 ```
 
 Logs are in Cloud Logging under resource type `cloud_run_job`, one JSON entry

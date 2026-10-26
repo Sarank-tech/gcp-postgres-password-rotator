@@ -19,7 +19,7 @@ flowchart LR
     subgraph GitHub
         GH[Push to main] --> GA[GitHub Actions]
     end
-    subgraph GCP["GCP project shriramblue (europe-west1)"]
+    subgraph GCP["GCP project ingka-dp-sap-dev (europe-west1)"]
         WIF[Workload Identity<br/>Federation]
         AR[(Artifact Registry<br/>rotator-repo)]
         SCH[Cloud Scheduler<br/>0 0 1 */4 *]
@@ -139,7 +139,7 @@ On each execution:
 
 | Service account | Used by | Permissions |
 | --- | --- | --- |
-| `sa-cicd-deployer` | GitHub Actions through WIF (only `Sarank-tech/gcp-postgres-password-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
+| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/p2p-postgrespwd-ratator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
 | `sa-db-rotator-dev` | The Cloud Run Job | Custom role `CustomPostgresRotatorDev`: `secretmanager.secrets.get`, `secretmanager.versions.access`, `secretmanager.versions.add`, `cloudsql.instances.get`, `cloudsql.users.update` |
 | `sa-rotator-scheduler-dev` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
@@ -165,7 +165,7 @@ Notes:
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |
 | Workload Identity Pool `github-actions-pool-dev` | Trusts `token.actions.githubusercontent.com` | Terraform |
-| GCS bucket `shriramblue-tfstate-dev` | Terraform state (`postgres-password-rotator/dev`) | **Not** Terraform (pre-existing) |
+| GCS bucket `p2p-postgrespwd-tfstate-dev` | Terraform state (`postgres-password-rotator/dev`) | **Not** Terraform (pre-existing) |
 
 Outbound calls from the job: Secret Manager API (public Google endpoint;
 egress is private-ranges-only, so it doesn't go through the connector) and

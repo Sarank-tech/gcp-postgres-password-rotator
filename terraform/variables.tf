@@ -5,7 +5,7 @@
 variable "project_id" {
   description = "GCP project ID that hosts the rotator."
   type        = string
-  default     = "shriramblue"
+  default     = "ingka-dp-sap-dev"
 }
 
 variable "region" {
@@ -51,7 +51,7 @@ variable "github_repository" {
 
   validation {
     condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
-    error_message = "github_repository must be in the form \"<org>/<repo>\", e.g. \"Sarank-tech/gcp-postgres-password-rotator\"."
+    error_message = "github_repository must be in the form \"<org>/<repo>\", e.g. \"ingka-group-digital/p2p-postgrespwd-ratator\"."
   }
 }
 
@@ -76,7 +76,7 @@ variable "wif_provider_id" {
 variable "tfstate_bucket" {
   description = "GCS bucket holding Terraform state (CI/CD SA gets object access on it)."
   type        = string
-  default     = "shriramblue-tfstate-dev"
+  default     = "p2p-postgrespwd-tfstate-dev"
 }
 
 variable "cicd_project_roles" {

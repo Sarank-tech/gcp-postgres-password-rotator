@@ -16,14 +16,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PROJECT_ID: shriramblue
+  PROJECT_ID: ingka-dp-sap-dev
   REGION: europe-west1
-  # terraform output wif_provider_name
-  WIF_PROVIDER: projects/242762429775/locations/global/workloadIdentityPools/github-actions-pool-dev/providers/github-provider-dev
+  # terraform output wif_provider_name. TODO: replace PROJECT_NUMBER with the
+  # numeric project number of ingka-dp-sap-dev after the first terraform apply.
+  WIF_PROVIDER: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions-pool-dev/providers/github-provider-dev
   # terraform output cicd_service_account_email
-  DEPLOY_SA: sa-cicd-deployer@shriramblue.iam.gserviceaccount.com
+  DEPLOY_SA: sa-cicd-deployer@ingka-dp-sap-dev.iam.gserviceaccount.com
   REGISTRY: europe-west1-docker.pkg.dev
-  IMAGE: europe-west1-docker.pkg.dev/shriramblue/rotator-repo/rotator
+  IMAGE: europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator
   JOB_NAME: postgres-password-rotator-dev
 
 jobs:

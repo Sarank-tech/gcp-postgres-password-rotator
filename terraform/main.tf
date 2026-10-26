@@ -16,7 +16,7 @@ terraform {
   }
 
   backend "gcs" {
-    bucket = "shriramblue-tfstate-dev"
+    bucket = "p2p-postgrespwd-tfstate-dev"
     prefix = "postgres-password-rotator/dev"
   }
 }

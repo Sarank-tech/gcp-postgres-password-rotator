@@ -138,10 +138,10 @@ resource "google_service_account_iam_member" "cicd_wif_binding" {
 }
 
 ###############################################################################
-# 3. Runtime service account & custom role
+# 3. Runtime service account & secret access
 #
-# The Cloud Run Job runs as sa-db-rotator-dev with a minimal custom role:
-# update Cloud SQL user passwords and read/write the password secrets.
+# The Cloud Run Job runs as sa-db-rotator-dev and can only read and add
+# versions of the mapped password secrets (not every secret in the project).
 ###############################################################################
 
 resource "google_service_account" "db_rotator" {
@@ -149,33 +149,29 @@ resource "google_service_account" "db_rotator" {
   display_name = "PostgreSQL password rotator runtime (${var.environment})"
 }
 
-# Custom roles live under projects/<id>/roles/<role_id>; the "roles/" prefix is
-# reserved for predefined roles. Note: a deleted custom role ID cannot be
-# reused for ~37 days.
-resource "google_project_iam_custom_role" "postgres_rotator" {
-  role_id     = "CustomPostgresRotator${title(var.environment)}"
-  title       = "Postgres Password Rotator (${var.environment})"
-  description = "Minimal permissions to rotate Cloud SQL user passwords and store them in Secret Manager."
-
-  permissions = [
-    "cloudsql.users.update",
-    "cloudsql.instances.get",
-    "secretmanager.versions.add",
-    "secretmanager.versions.access",
-    "secretmanager.secrets.get",
-  ]
-}
-
-resource "google_project_iam_member" "db_rotator_custom_role" {
-  project = var.project_id
-  role    = google_project_iam_custom_role.postgres_rotator.id
-  member  = "serviceAccount:${google_service_account.db_rotator.email}"
-}
-
 # Fail fast at plan time if any mapped secret does not exist.
 data "google_secret_manager_secret" "mapped" {
   for_each  = var.user_secret_mappings
   secret_id = each.value
+}
+
+# Read the current password and add new versions, on mapped secrets only.
+resource "google_secret_manager_secret_iam_member" "db_rotator_accessor" {
+  for_each = data.google_secret_manager_secret.mapped
+
+  project   = var.project_id
+  secret_id = each.value.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.db_rotator.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "db_rotator_version_adder" {
+  for_each = data.google_secret_manager_secret.mapped
+
+  project   = var.project_id
+  secret_id = each.value.secret_id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${google_service_account.db_rotator.email}"
 }
 
 # Fail fast if the target instance does not exist; also exposes its private IP.
@@ -318,7 +314,8 @@ resource "google_cloud_run_v2_job" "rotator" {
 
   depends_on = [
     google_project_service.apis,
-    google_project_iam_member.db_rotator_custom_role,
+    google_secret_manager_secret_iam_member.db_rotator_accessor,
+    google_secret_manager_secret_iam_member.db_rotator_version_adder,
   ]
 }
 

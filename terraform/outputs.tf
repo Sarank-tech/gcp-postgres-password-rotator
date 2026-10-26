@@ -23,11 +23,6 @@ output "scheduler_service_account_email" {
   value       = google_service_account.scheduler.email
 }
 
-output "custom_role_id" {
-  description = "Full ID of the custom rotator role."
-  value       = google_project_iam_custom_role.postgres_rotator.id
-}
-
 output "cloud_run_job_name" {
   description = "Cloud Run Job name."
   value       = google_cloud_run_v2_job.rotator.name

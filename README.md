@@ -128,11 +128,12 @@ gcloud auth application-default set-quota-project ingka-dp-sap-dev
 ```
 
 **2. Check the account's access.** It needs `roles/owner` on the project, or
-at least: Service Usage Admin, Service Account Admin, Project IAM Admin, Role
-Administrator, Workload Identity Pool Admin, Cloud Run Admin, Cloud Scheduler
-Admin, Serverless VPC Access Admin, Artifact Registry Administrator, Service
-Account User, Cloud SQL Viewer, Secret Manager Viewer, and Storage Admin on the
-state bucket.
+at least: Service Usage Admin, Service Account Admin, Project IAM Admin,
+Workload Identity Pool Admin, Cloud Run Admin, Cloud Scheduler Admin,
+Serverless VPC Access Admin, Artifact Registry Administrator, Service Account
+User, Cloud SQL Viewer, Secret Manager Admin (to grant access on the password
+secrets), and Storage Admin on the state bucket. No custom-role permissions
+are needed.
 
 **3. Create what Terraform expects to already exist:**
 

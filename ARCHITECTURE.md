@@ -70,7 +70,7 @@ flowchart LR
 └── terraform/
     ├── main.tf                 # Backend, provider, and all resources, in
     │                           #   numbered sections (APIs, WIF, CI SA,
-    │                           #   runtime SA + custom role, VPC connector,
+    │                           #   runtime SA + secret IAM, VPC connector,
     │                           #   Artifact Registry, Cloud Run Job, Scheduler)
     ├── variables.tf            # Inputs with dev defaults
     ├── terraform.tfvars        # Dev values (committed; no secrets)
@@ -140,15 +140,14 @@ On each execution:
 | Service account | Used by | Permissions |
 | --- | --- | --- |
 | `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/p2p-postgrespwd-ratator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
-| `sa-db-rotator-dev` | The Cloud Run Job | Custom role `CustomPostgresRotatorDev`: `secretmanager.secrets.get`, `secretmanager.versions.access`, `secretmanager.versions.add`, `cloudsql.instances.get`, `cloudsql.users.update` |
+| `sa-db-rotator-dev` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only |
 | `sa-rotator-scheduler-dev` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
 Notes:
 
-- The custom role is bound **project-wide**, so the rotator can read and write
-  every secret in the project, not just the four `*_pwd` secrets.
-- The two `cloudsql.*` permissions aren't used: passwords change over SQL, not
-  the Cloud SQL Admin API.
+- The rotator needs no Cloud SQL IAM role: passwords change over SQL, not the
+  Cloud SQL Admin API. Built-in roles are used instead of a custom role, so
+  no environment needs `iam.roles.create`.
 - Inside PostgreSQL the job connects as `postgres` (a member of
   `cloudsqlsuperuser`, not a true superuser). On PostgreSQL 16 it can only
   change passwords of roles it has `ADMIN OPTION` on.

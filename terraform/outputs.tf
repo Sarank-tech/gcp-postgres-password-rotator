@@ -29,8 +29,8 @@ output "cloud_run_job_name" {
 }
 
 output "artifact_registry_repository_url" {
-  description = "Docker repository URL to push rotator images to."
-  value       = "${google_artifact_registry_repository.rotator.location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.rotator.repository_id}"
+  description = "Docker repository URL to push rotator images to (null where the registry isn't hosted)."
+  value       = var.create_artifact_registry ? "${google_artifact_registry_repository.rotator[0].location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.rotator[0].repository_id}" : null
 }
 
 output "vpc_connector_id" {

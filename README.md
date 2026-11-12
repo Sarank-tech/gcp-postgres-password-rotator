@@ -151,7 +151,7 @@ gcloud auth application-default set-quota-project <project>
 **2. Check the account's access.** It needs `roles/owner` on the project, or
 at least: Service Usage Admin, Service Account Admin, Project IAM Admin,
 Workload Identity Pool Admin, Cloud Run Admin, Cloud Scheduler Admin,
-Serverless VPC Access Admin, Artifact Registry Administrator, Service Account
+Serverless VPC Access Admin, Artifact Registry Administrator (dev only), Service Account
 User, Cloud SQL Viewer, Secret Manager Admin (to grant access on the password
 secrets), and Storage Admin on the state bucket. No custom-role permissions
 are needed.
@@ -216,9 +216,10 @@ run the workflow manually, to deploy the real image.
 **Application:** merge to `main`. `.github/workflows/deploy.yaml` builds the
 image once, pushes it to dev's registry tagged with the commit SHA and
 `latest`, and points dev's Cloud Run Job at the new digest. The `test` job
-then waits for a reviewer. Once approved, it copies that same image (checked
-against the commit SHA) into test's registry and points test's job at it. A
-newer run's pending test deploy replaces an older one. Only the `main` branch
+then waits for a reviewer. Once approved, it points test's job at that same
+image in dev's registry (checked against the commit SHA; nothing is copied)
+and tags it `deployed-test` so dev's cleanup keeps it. A newer run's pending
+test deploy replaces an older one. Only the `main` branch
 of this repository can authenticate to GCP.
 
 **Infrastructure:** run Terraform by hand, one environment at a time,

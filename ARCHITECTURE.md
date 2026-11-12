@@ -144,17 +144,20 @@ WIF as dev's `sa-cicd-deployer` → `docker build` → push `rotator:<sha>` and
 
 → **test job** (GitHub Environment `test`, waits for a required reviewer):
 pulls that digest with dev's identity, checks its revision label equals the
-commit SHA, switches to test's WIF identity, pushes it to test's registry, and
-updates test's job to that digest. Nothing is rebuilt. Each environment keeps
-its own copy, so dev's 3-image cleanup policy can't delete an image test
-still runs. If dev's copy is cleaned up before someone approves test, the
-test job fails at the pull; approve a newer run instead.
+commit SHA, switches to test's WIF identity and points test's job at the same
+digest in dev's registry, then tags it `deployed-test` (as dev). Nothing is
+rebuilt or copied: dev's registry is the only one, test's Cloud Run service
+agent reads from it, and the `deployed-<env>` tag stops dev's cleanup policy
+from deleting an image test still runs. If the image is cleaned up before
+someone approves test, the test job fails at the pull; approve a newer run
+instead.
 
 ## Identities and permissions
 
 | Service account | Used by | Permissions |
 | --- | --- | --- |
-| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
+| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Cloud Build editor, Scheduler admin, VPC Access user, Artifact Registry writer (dev only); object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
+| Cloud Run service agent of test (and later envs) | Cloud Run, pulling the image | `roles/artifactregistry.reader` on dev's `rotator-repo` only |
 | `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
 | `sa-rotator-scheduler-<env>` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
@@ -175,7 +178,7 @@ Notes:
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
 | Serverless VPC Access connector `pg-rotator-conn-<env>` | Gives the job a path into `ingka-dp-vpc-1` VPC (`vpc_connector_cidr`, `10.8.0.0/28` in dev; egress `PRIVATE_RANGES_ONLY`) | Terraform |
 | Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
-| Artifact Registry `rotator-repo` | Image storage; keeps the 3 newest versions, deletes all others | Terraform |
+| Artifact Registry `rotator-repo` (dev only) | The single image store for all environments; keeps the 3 newest versions and every `deployed-<env>` image, deletes all others | Terraform |
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |
 | Workload Identity Pool `github-actions-pool-<env>` | Trusts `token.actions.githubusercontent.com` | Terraform |

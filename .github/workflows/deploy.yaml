@@ -1,9 +1,9 @@
 name: Build and deploy rotator
 
 # Trunk-based: main is the only long-lived branch. Every push to main builds
-# the image once and deploys it to dev; test then gets that exact image (same
-# commit, promoted by digest, never rebuilt) once a reviewer approves the
-# "test" GitHub Environment.
+# the image once, into dev's registry (the only one), and deploys it to dev;
+# test then runs that exact image from dev's registry (same digest, never
+# rebuilt or copied) once a reviewer approves the "test" GitHub Environment.
 #
 # Per-environment values live in GitHub Environment variables (Settings ->
 # Environments -> <env>): PROJECT_ID, REGION, WIF_PROVIDER, DEPLOY_SA.
@@ -133,9 +133,8 @@ jobs:
       REGION: ${{ vars.REGION }}
       WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
       DEPLOY_SA: ${{ vars.DEPLOY_SA }}
-      REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
-      IMAGE: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo/rotator
       JOB_NAME: postgres-password-rotator-test
+      DEPLOYED_TAG: deployed-test
 
     steps:
       - name: Check environment variables
@@ -147,7 +146,7 @@ jobs:
             fi
           done
 
-      # Pull the exact image dev runs, using dev's identity.
+      # Check the image in dev's registry is the one built from this commit.
       - name: Authenticate to dev
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
@@ -157,7 +156,7 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
-      - name: Pull image from dev
+      - name: Verify image
         run: |
           gcloud auth configure-docker "${SOURCE_IMAGE%%/*}" --quiet
           docker pull "${SOURCE_IMAGE}"
@@ -167,42 +166,41 @@ jobs:
             exit 1
           fi
 
-      # Switch to test's identity; later gcloud and docker calls use it.
+      # Test's Cloud Run pulls from dev's registry through its service agent
+      # (granted in dev's Terraform), so nothing is copied.
       - name: Authenticate to test
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SA }}
 
-      # Each environment keeps its own copy, so dev's cleanup policy can't
-      # delete an image test still runs.
-      - name: Push image to test
-        id: push
-        run: |
-          gcloud auth configure-docker "${REGISTRY}" --quiet
-          docker tag "${SOURCE_IMAGE}" "${IMAGE}:${GITHUB_SHA}"
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          digest="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" | grep "^${IMAGE}@")"
-          echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
-          echo "Pushed ${digest}"
-
       - name: Update Cloud Run Job
-        env:
-          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
         run: |
           gcloud run jobs update "${JOB_NAME}" \
             --project="${PROJECT_ID}" \
             --region="${REGION}" \
-            --image="${IMAGE_REF}" \
+            --image="${SOURCE_IMAGE}" \
+            --quiet
+
+      # Tag what test now runs, so dev's cleanup policy never deletes it.
+      # Done after the deploy: a failed deploy leaves the tag on the image
+      # test is still running.
+      - name: Authenticate to dev (tag)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ needs.dev.outputs.wif_provider }}
+          service_account: ${{ needs.dev.outputs.deploy_sa }}
+
+      - name: Tag image as deployed to test
+        run: |
+          gcloud artifacts docker tags add \
+            "${SOURCE_IMAGE}" "${SOURCE_IMAGE%@*}:${DEPLOYED_TAG}" \
             --quiet
 
       - name: Summary
-        env:
-          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
         run: |
           {
             echo "### Deployed ${JOB_NAME}"
             echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Promoted from: \`${SOURCE_IMAGE}\`"
-            echo "- Image: \`${IMAGE_REF}\`"
+            echo "- Image: \`${SOURCE_IMAGE}\` (tagged \`${DEPLOYED_TAG}\`)"
           } >> "${GITHUB_STEP_SUMMARY}"

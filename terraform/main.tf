@@ -35,6 +35,12 @@ locals {
   wif_provider_id = coalesce(var.wif_provider_id, "github-provider-${var.environment}")
   tfstate_bucket  = coalesce(var.tfstate_bucket, "mdm-postgrespwd-tfstate-${var.environment}")
 
+  # Only the project that hosts the registry needs push access.
+  cicd_project_roles = concat(
+    var.cicd_project_roles,
+    var.create_artifact_registry ? ["roles/artifactregistry.writer"] : [],
+  )
+
   required_apis = [
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
@@ -113,7 +119,7 @@ resource "google_service_account" "cicd_deployer" {
 }
 
 resource "google_project_iam_member" "cicd_roles" {
-  for_each = toset(var.cicd_project_roles)
+  for_each = toset(local.cicd_project_roles)
 
   project = var.project_id
   role    = each.value
@@ -216,17 +222,22 @@ resource "google_vpc_access_connector" "rotator" {
 }
 
 ###############################################################################
-# 4b. Artifact Registry
+# 4b. Artifact Registry (dev only)
 #
-# Holds the rotator image. CI pushes a tag per commit SHA plus "latest"; the
-# cleanup policy keeps the 3 newest versions and deletes all others.
+# Build once, run everywhere: CI pushes each image once, to dev's registry
+# (a tag per commit SHA plus "latest"), and later environments run that same
+# digest from here. The cleanup policy keeps the 3 newest versions plus
+# whatever each environment currently runs (tagged deployed-<env> by CI), and
+# deletes all others.
 ###############################################################################
 
 resource "google_artifact_registry_repository" "rotator" {
+  count = var.create_artifact_registry ? 1 : 0
+
   repository_id = "rotator-repo"
   location      = var.region
   format        = "DOCKER"
-  description   = "Images for ${local.job_name}"
+  description   = "Images for postgres-password-rotator (all environments)"
 
   cleanup_policy_dry_run = false
 
@@ -238,7 +249,17 @@ resource "google_artifact_registry_repository" "rotator" {
     }
   }
 
-  # Matches every version; KEEP takes precedence, so only the 3 newest stay.
+  # Never delete an image an environment is running.
+  cleanup_policies {
+    id     = "keep-deployed"
+    action = "KEEP"
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["deployed-"]
+    }
+  }
+
+  # Matches every version; KEEP takes precedence, so only the above stay.
   cleanup_policies {
     id     = "delete-others"
     action = "DELETE"
@@ -248,6 +269,21 @@ resource "google_artifact_registry_repository" "rotator" {
   }
 
   depends_on = [google_project_service.apis]
+}
+
+moved {
+  from = google_artifact_registry_repository.rotator
+  to   = google_artifact_registry_repository.rotator[0]
+}
+
+# Cloud Run in the other environments pulls images with its service agent.
+resource "google_artifact_registry_repository_iam_member" "image_readers" {
+  for_each = var.create_artifact_registry ? toset(var.image_reader_project_numbers) : toset([])
+
+  location   = google_artifact_registry_repository.rotator[0].location
+  repository = google_artifact_registry_repository.rotator[0].name
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:service-${each.value}@serverless-robot-prod.iam.gserviceaccount.com"
 }
 
 ###############################################################################

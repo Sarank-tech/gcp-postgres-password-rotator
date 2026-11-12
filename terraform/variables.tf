@@ -85,17 +85,32 @@ variable "tfstate_bucket" {
 }
 
 variable "cicd_project_roles" {
-  description = "Project-level roles granted to the CI/CD deployer SA (deploy Cloud Run / Functions, push images, manage schedules)."
+  description = "Project-level roles granted to the CI/CD deployer SA (deploy Cloud Run / Functions, manage schedules). Artifact Registry writer is added where the registry lives."
   type        = list(string)
   default = [
     "roles/run.admin",
     "roles/cloudfunctions.developer",
-    "roles/artifactregistry.writer",
     "roles/cloudbuild.builds.editor",
     "roles/cloudscheduler.admin",
     "roles/vpcaccess.user",
     "roles/serviceusage.serviceUsageConsumer",
   ]
+}
+
+###############################################################################
+# Container images (build once, run everywhere)
+###############################################################################
+
+variable "create_artifact_registry" {
+  description = "Host the image registry in this project. Only dev does: CI builds each image once into dev's registry, and later environments run that same image from there."
+  type        = bool
+  default     = true
+}
+
+variable "image_reader_project_numbers" {
+  description = "Project numbers of the environments that run images from this project's registry. Their Cloud Run service agent gets read access."
+  type        = list(string)
+  default     = []
 }
 
 ###############################################################################

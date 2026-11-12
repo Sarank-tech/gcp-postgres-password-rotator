@@ -14,3 +14,6 @@ user_secret_mappings = {
 
 vpc_network        = "ingka-dp-vpc-1"
 vpc_connector_cidr = "10.8.0.0/28"
+
+# Runs the image from dev's registry; no registry of its own.
+create_artifact_registry = false

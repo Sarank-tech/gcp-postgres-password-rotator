@@ -11,9 +11,10 @@ commands, see [README.md](README.md).
 - Environments are **deployment targets, not branches**. There is no `dev`,
   `test`, `stage` or `prod` branch, and nothing is merged "up" between
   environments.
-- **Build once, promote the artifact.** Each merge to `main` builds one image.
-  Every later environment runs that exact image (same digest, same commit),
-  so what was tested is what reaches production.
+- **Build once, promote the artifact.** Each merge to `main` builds one image,
+  stored once, in dev's Artifact Registry. Every later environment runs that
+  exact image (same digest, same commit) straight from there, so what was
+  tested is what reaches production.
 - Hotfixes follow the same path as any other change: `fix/*` → PR → `main`
   → promote. Nothing has to be merged back anywhere.
 
@@ -21,7 +22,7 @@ commands, see [README.md](README.md).
 | --- | --- |
 | One branch per environment | `main` plus short-lived branches |
 | Promote by merging branches | Promote by deploying the same image |
-| Each environment builds its own image | One image, copied by digest |
+| Each environment builds its own image | One image, one registry, deployed by digest |
 | Hotfixes merged back into every branch | Nothing to merge back |
 
 ## Environments
@@ -34,8 +35,9 @@ commands, see [README.md](README.md).
 | prod | _tbd_ | Approval required | Not set up |
 
 Each environment has its own GCP project, Terraform state bucket
-(`mdm-postgrespwd-tfstate-<env>`), Workload Identity pool, service accounts,
-Artifact Registry and Cloud Run Job (`postgres-password-rotator-<env>`).
+(`mdm-postgrespwd-tfstate-<env>`), Workload Identity pool, service accounts
+and Cloud Run Job (`postgres-password-rotator-<env>`). Only dev has an
+Artifact Registry (`rotator-repo`); the other environments run images from it.
 
 ## Pipeline
 
@@ -56,8 +58,8 @@ flowchart LR
 
     subgraph TEST[test job · environment test]
         PULL[Pull digest from dev<br/>using dev identity] --> CHK[Check revision label<br/>= commit SHA]
-        CHK --> P2[Push to test registry<br/>using test identity]
-        P2 --> U2[Update test Cloud Run Job<br/>to image digest]
+        CHK --> U2[Update test Cloud Run Job<br/>to dev's digest, as test]
+        U2 --> T2[Tag image deployed-test<br/>in dev's registry]
     end
 ```
 
@@ -77,11 +79,14 @@ flowchart LR
 1. Waits for a required reviewer on the `test` GitHub Environment.
 2. Authenticates **as dev** and pulls the exact digest dev deployed.
 3. Fails if the image's revision label isn't this run's commit SHA.
-4. Authenticates **as test**, pushes the image to test's registry and points
-   test's Cloud Run Job at that digest.
+4. Authenticates **as test** and points test's Cloud Run Job at that digest in
+   dev's registry. Test's Cloud Run service agent has read access to dev's
+   registry (granted by dev's Terraform, `image_reader_project_numbers`).
+5. Authenticates **as dev** again and tags the image `deployed-test`, so dev's
+   cleanup policy keeps it while test runs it. The tag moves with each
+   promotion.
 
-Nothing is rebuilt. Each environment keeps its own copy of the image, so one
-environment's cleanup policy can't delete an image another still runs.
+Nothing is rebuilt or copied: there is one image, in one registry.
 
 ### Concurrency
 
@@ -127,9 +132,9 @@ are exchanged for that environment's `sa-cicd-deployer`, which can push
 images, update the Cloud Run Job and act as the job's runtime service account,
 and nothing broader.
 
-The test job holds two identities in turn: dev's (read the image) and test's
-(push and deploy). Each later environment follows the same pattern from the
-environment before it.
+The test job switches identities: dev's (verify the image), test's (deploy),
+then dev's again (tag the image). Each later environment follows the same
+pattern.
 
 ## Infrastructure changes
 
@@ -154,10 +159,17 @@ terraform apply <env>.tfplan
 
 ## Image retention
 
-Each environment's Artifact Registry keeps the **3 newest** image versions and
-deletes the rest (cleanup runs about daily). Consequences:
+Dev's Artifact Registry is the only registry. Its cleanup policy (runs about
+daily) keeps:
 
-- An environment can roll back about two deploys from its own registry.
+- the **3 newest** image versions, and
+- every image tagged `deployed-<env>`, i.e. what each later environment
+  currently runs,
+
+and deletes the rest. Consequences:
+
+- Dev can roll back about two deploys. Other environments roll back by
+  promoting again (or by pointing at one of the 3 newest).
 - If more than three merges land before someone approves test, dev may have
   already deleted the image the old run would promote. That test job fails at
   the pull; approve a newer run instead.
@@ -168,15 +180,18 @@ deletes the rest (cleanup runs about daily). Consequences:
 promote as usual.
 
 **Fast, one environment:** point the job back at an earlier digest still in
-that environment's registry:
+dev's registry:
 
 ```sh
 gcloud artifacts docker images list \
-  europe-west1-docker.pkg.dev/<project>/rotator-repo/rotator --include-tags
+  europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator --include-tags
 gcloud run jobs update postgres-password-rotator-<env> \
-  --image=europe-west1-docker.pkg.dev/<project>/rotator-repo/rotator@sha256:<digest> \
+  --image=europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator@sha256:<digest> \
   --region=europe-west1 --project=<project>
 ```
+
+For an environment other than dev, also move its tag so cleanup keeps that
+image: `gcloud artifacts docker tags add <image>@sha256:<digest> <image>:deployed-<env>`.
 
 The next promotion to that environment replaces it again, so follow up with a
 revert on `main`.
@@ -189,14 +204,16 @@ commit (a new digest), and the test job re-promotes it after approval.
 
 1. Create the state bucket `mdm-postgrespwd-tfstate-<env>` (versioned,
    uniform access, public access prevention).
-2. Add `terraform/envs/<env>.tfvars` and `terraform/envs/<env>.backend.hcl`.
+2. Add `terraform/envs/<env>.tfvars` (with `create_artifact_registry = false`)
+   and `terraform/envs/<env>.backend.hcl`.
 3. Run the first Terraform apply locally (see Infrastructure changes).
-4. Create the GitHub Environment with its variables, `main`-only deployment
+4. Add the new project's number to `image_reader_project_numbers` in
+   `envs/dev.tfvars` and apply dev.
+5. Create the GitHub Environment with its variables, `main`-only deployment
    branches and required reviewers.
-5. Add a `<env>` job to `deploy.yaml`, copied from the `test` job. Set `needs:`
-   to the previous environment, authenticate to the previous environment to
-   pull, then to this one to push and deploy. Expose the previous
-   environment's WIF identity as job outputs, the way the `dev` job does.
+6. Add a `<env>` job to `deploy.yaml`, copied from the `test` job, with
+   `needs:` set to the previous environment and `DEPLOYED_TAG: deployed-<env>`.
+   It still verifies and tags through dev's identity (`needs.dev.outputs`).
 
 ## Troubleshooting
 
@@ -205,5 +222,6 @@ commit (a new digest), and the test job re-promotes it after approval.
 | `Variable X is not set on the <env> environment` | GitHub Environment missing or a variable not added |
 | Auth step fails with `unauthorized_client` / `permission denied` | Wrong `WIF_PROVIDER`/`DEPLOY_SA`, workflow not running from `main`, or repository name changed without updating `github_repository` in tfvars |
 | Test job fails pulling the image | Dev's cleanup removed that digest; approve a newer run |
+| Test job update fails with an image permission error | Test's project number missing from `image_reader_project_numbers` in `envs/dev.tfvars`, or dev not applied since |
 | `Image revision ... does not match commit` | Dev's output points at an image built from another commit; re-run the whole workflow |
 | Deploy succeeds but rotation fails to connect | Not a pipeline problem: check the job's logs (Cloud SQL permissions, network path, instance SSL mode) |

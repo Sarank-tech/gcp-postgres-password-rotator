@@ -12,6 +12,5 @@ user_secret_mappings = {
   "int_mdm_016" = "int_mdm_016_pwd"
 }
 
-vpc_network = "ingka-dp-vpc-1"
-# TODO: confirm this /28 is unused in ingka-dp-sap-test before the first apply.
+vpc_network        = "ingka-dp-vpc-1"
 vpc_connector_cidr = "10.8.0.0/28"

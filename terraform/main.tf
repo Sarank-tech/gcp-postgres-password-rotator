@@ -1,8 +1,11 @@
 ###############################################################################
 # Terraform settings & remote backend
 #
-# State lives in GCS. Backend blocks cannot use variables, so the bucket and
-# prefix are hard-coded here.
+# State lives in GCS, one bucket per environment. Backend blocks cannot use
+# variables, so the bucket and prefix come from envs/<env>.backend.hcl:
+#
+#   terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
+#   terraform plan -var-file=envs/<env>.tfvars
 ###############################################################################
 
 terraform {
@@ -15,10 +18,7 @@ terraform {
     }
   }
 
-  backend "gcs" {
-    bucket = "mdm-postgrespwd-tfstate-dev"
-    prefix = "postgres-password-rotator/dev"
-  }
+  backend "gcs" {}
 }
 
 provider "google" {
@@ -30,6 +30,10 @@ data "google_project" "this" {}
 
 locals {
   job_name = "postgres-password-rotator-${var.environment}"
+
+  wif_pool_id     = coalesce(var.wif_pool_id, "github-actions-pool-${var.environment}")
+  wif_provider_id = coalesce(var.wif_provider_id, "github-provider-${var.environment}")
+  tfstate_bucket  = coalesce(var.tfstate_bucket, "mdm-postgrespwd-tfstate-${var.environment}")
 
   required_apis = [
     "cloudresourcemanager.googleapis.com",
@@ -67,7 +71,7 @@ resource "google_project_service" "apis" {
 ###############################################################################
 
 resource "google_iam_workload_identity_pool" "github" {
-  workload_identity_pool_id = var.wif_pool_id
+  workload_identity_pool_id = local.wif_pool_id
   display_name              = "GitHub Actions (${var.environment})"
   description               = "Federates GitHub Actions OIDC tokens for ${var.github_repository}"
 
@@ -76,7 +80,7 @@ resource "google_iam_workload_identity_pool" "github" {
 
 resource "google_iam_workload_identity_pool_provider" "github" {
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
-  workload_identity_pool_provider_id = var.wif_provider_id
+  workload_identity_pool_provider_id = local.wif_provider_id
   display_name                       = "GitHub OIDC"
 
   attribute_mapping = {
@@ -118,7 +122,7 @@ resource "google_project_iam_member" "cicd_roles" {
 
 # State management: scoped to the state bucket only, not project-wide.
 resource "google_storage_bucket_iam_member" "cicd_tfstate" {
-  bucket = var.tfstate_bucket
+  bucket = local.tfstate_bucket
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.cicd_deployer.email}"
 }
@@ -140,7 +144,7 @@ resource "google_service_account_iam_member" "cicd_wif_binding" {
 ###############################################################################
 # 3. Runtime service account & secret access
 #
-# The Cloud Run Job runs as sa-db-rotator-dev and can only read and add
+# The Cloud Run Job runs as sa-db-rotator-<env> and can only read and add
 # versions of the mapped password secrets (not every secret in the project).
 ###############################################################################
 

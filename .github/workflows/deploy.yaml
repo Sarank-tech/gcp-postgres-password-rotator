@@ -1,5 +1,12 @@
 name: Build and deploy rotator
 
+# Trunk-based: main is the only long-lived branch. Every push to main builds
+# the image once and deploys it to dev; test then gets that exact image (same
+# commit, promoted by digest, never rebuilt) once a reviewer approves the
+# "test" GitHub Environment.
+#
+# Per-environment values live in GitHub Environment variables (Settings ->
+# Environments -> <env>): PROJECT_ID, REGION, WIF_PROVIDER, DEPLOY_SA.
 on:
   push:
     branches: [main]
@@ -10,35 +17,50 @@ permissions:
   contents: read
   id-token: write
 
-# Never run two deploys at once; queue instead of cancelling mid-deploy.
-concurrency:
-  group: deploy-dev
-  cancel-in-progress: false
-
-env:
-  PROJECT_ID: ingka-dp-sap-dev
-  REGION: europe-west1
-  # terraform output wif_provider_name
-  WIF_PROVIDER: projects/1092455534132/locations/global/workloadIdentityPools/github-actions-pool-dev/providers/github-provider-dev
-  # terraform output cicd_service_account_email
-  DEPLOY_SA: sa-cicd-deployer@ingka-dp-sap-dev.iam.gserviceaccount.com
-  REGISTRY: europe-west1-docker.pkg.dev
-  IMAGE: europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator
-  JOB_NAME: postgres-password-rotator-dev
-
 jobs:
-  deploy:
+  # Build once, push to dev's Artifact Registry, deploy to dev.
+  dev:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: dev
+
+    # Never run two deploys to the same environment at once.
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+      DEPLOY_SA: ${{ vars.DEPLOY_SA }}
+      REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
+      IMAGE: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo/rotator
+      JOB_NAME: postgres-password-rotator-dev
+
+    # Handed to the promotion jobs: what to promote and how to read it.
+    outputs:
+      image_ref: ${{ steps.push.outputs.image_ref }}
+      wif_provider: ${{ vars.WIF_PROVIDER }}
+      deploy_sa: ${{ vars.DEPLOY_SA }}
 
     steps:
+      - name: Check environment variables
+        run: |
+          for name in PROJECT_ID REGION WIF_PROVIDER DEPLOY_SA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable ${name} is not set on the dev environment"
+              exit 1
+            fi
+          done
+
       # Third-party actions are pinned to full commit SHAs (tags are mutable).
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Step 1: keyless auth via Workload Identity Federation.
+      # Keyless auth via Workload Identity Federation.
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
@@ -48,11 +70,10 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
-      # Step 2: let Docker push to Artifact Registry using the WIF credentials.
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "${REGISTRY}" --quiet
 
-      # Step 3: build once, tag with the commit SHA (traceable) and latest.
+      # Tag with the commit SHA (traceable) and latest.
       - name: Build image
         run: |
           docker build \
@@ -72,7 +93,7 @@ jobs:
           echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
           echo "Pushed ${digest}"
 
-      # Step 4: point the job at the exact digest just pushed, so what runs is
+      # Point the job at the exact digest just pushed, so what runs is
       # immutable even if "latest" moves later.
       - name: Update Cloud Run Job
         env:
@@ -91,5 +112,97 @@ jobs:
           {
             echo "### Deployed ${JOB_NAME}"
             echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Image: \`${IMAGE_REF}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # Promote dev's image to test. Waits for a reviewer on the "test"
+  # environment; a newer run's pending test deploy replaces an older one.
+  test:
+    needs: dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: test
+
+    concurrency:
+      group: deploy-test
+      cancel-in-progress: false
+
+    env:
+      SOURCE_IMAGE: ${{ needs.dev.outputs.image_ref }}
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+      DEPLOY_SA: ${{ vars.DEPLOY_SA }}
+      REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
+      IMAGE: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo/rotator
+      JOB_NAME: postgres-password-rotator-test
+
+    steps:
+      - name: Check environment variables
+        run: |
+          for name in SOURCE_IMAGE PROJECT_ID REGION WIF_PROVIDER DEPLOY_SA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable ${name} is not set on the test environment"
+              exit 1
+            fi
+          done
+
+      # Pull the exact image dev runs, using dev's identity.
+      - name: Authenticate to dev
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ needs.dev.outputs.wif_provider }}
+          service_account: ${{ needs.dev.outputs.deploy_sa }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Pull image from dev
+        run: |
+          gcloud auth configure-docker "${SOURCE_IMAGE%%/*}" --quiet
+          docker pull "${SOURCE_IMAGE}"
+          revision="$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${SOURCE_IMAGE}")"
+          if [ "${revision}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Image revision ${revision} does not match commit ${GITHUB_SHA}"
+            exit 1
+          fi
+
+      # Switch to test's identity; later gcloud and docker calls use it.
+      - name: Authenticate to test
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      # Each environment keeps its own copy, so dev's cleanup policy can't
+      # delete an image test still runs.
+      - name: Push image to test
+        id: push
+        run: |
+          gcloud auth configure-docker "${REGISTRY}" --quiet
+          docker tag "${SOURCE_IMAGE}" "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          digest="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" | grep "^${IMAGE}@")"
+          echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "Pushed ${digest}"
+
+      - name: Update Cloud Run Job
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          gcloud run jobs update "${JOB_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${IMAGE_REF}" \
+            --quiet
+
+      - name: Summary
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          {
+            echo "### Deployed ${JOB_NAME}"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Promoted from: \`${SOURCE_IMAGE}\`"
             echo "- Image: \`${IMAGE_REF}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

@@ -107,11 +107,34 @@ To run the container locally, pass the same environment variables with `-e`,
 plus Application Default Credentials (for example by mounting
 `~/.config/gcloud` and setting `GOOGLE_APPLICATION_CREDENTIALS`).
 
+## Environments
+
+There are four environments, each in its own GCP project with its own
+Terraform state. The code is the same everywhere; only
+`terraform/envs/<env>.tfvars` and `terraform/envs/<env>.backend.hcl` differ.
+
+| Env | GCP project | Deploy |
+| --- | --- | --- |
+| dev | `ingka-dp-sap-dev` | Automatic on every push to `main` |
+| test | `ingka-dp-sap-test` | Same image as dev, after one approval click |
+| stage | _not set up yet_ | Approval required |
+| prod | _not set up yet_ | Approval required |
+
+Branching is trunk-based: `main` is the only long-lived branch, with
+short-lived `feature/*` and `fix/*` branches merged through PRs. Environments
+are deployment targets, not branches. The image is built once, and later
+environments get that exact image by digest.
+
 ## First-time environment setup
 
-Run once to stand up `ingka-dp-sap-dev`, using a user account with admin
-access to the project (the "bootstrap account"). After this, application
-deploys go through CI, and this account is only needed for Terraform changes.
+Run once per environment, using a user account with admin access to that
+environment's project (the "bootstrap account"). CI can't do this, because it
+can only authenticate once Terraform has created Workload Identity Federation
+in the project. After this, application deploys go through CI, and this
+account is only needed for Terraform changes.
+
+Below, `<env>` is `dev`, `test`, ... and `<project>` is that environment's
+project from the table above.
 
 **1. Log in as the bootstrap account.** Replace `<your-account-email>` with
 your own GCP login. Terraform uses Application Default Credentials, so the
@@ -120,9 +143,9 @@ your own GCP login. Terraform uses Application Default Credentials, so the
 ```sh
 gcloud auth login <your-account-email>
 gcloud config set account <your-account-email>
-gcloud config set project ingka-dp-sap-dev
+gcloud config set project <project>
 gcloud auth application-default login
-gcloud auth application-default set-quota-project ingka-dp-sap-dev
+gcloud auth application-default set-quota-project <project>
 ```
 
 **2. Check the account's access.** It needs `roles/owner` on the project, or
@@ -138,59 +161,81 @@ are needed.
 ```sh
 # APIs Terraform needs before it can enable the rest
 gcloud services enable cloudresourcemanager.googleapis.com \
-  serviceusage.googleapis.com --project=ingka-dp-sap-dev
+  serviceusage.googleapis.com --project=<project>
 
 # State bucket (versioned, private)
-gcloud storage buckets create gs://mdm-postgrespwd-tfstate-dev \
-  --project=ingka-dp-sap-dev --location=europe-west1 \
+gcloud storage buckets create gs://mdm-postgrespwd-tfstate-<env> \
+  --project=<project> --location=europe-west1 \
   --uniform-bucket-level-access --public-access-prevention
-gcloud storage buckets update gs://mdm-postgrespwd-tfstate-dev --versioning
+gcloud storage buckets update gs://mdm-postgrespwd-tfstate-<env> --versioning
 ```
 
 Also required, and not created by Terraform:
 
-- Cloud SQL instance `staging-database` with a **private IP** on the
-  `ingka-dp-vpc-1` VPC (Private Services Access set up on that network).
+- Cloud SQL instance `staging-database` (same name in every environment) with
+  a **private IP** on the `ingka-dp-vpc-1` VPC (Private Services Access set up
+  on that network).
 - Secrets `postgres_pwd`, `int_mdm_012_pwd`, `int_mdm_013_pwd`,
   `int_mdm_016_pwd`, each holding that user's **current** password.
 - On PostgreSQL 16, for each `int_mdm_*` user:
   `GRANT <user> TO postgres WITH ADMIN OPTION;`
+- An unused `/28` in the VPC for the Serverless VPC Access connector
+  (`vpc_connector_cidr` in `envs/<env>.tfvars`). It must not overlap any
+  subnet, the Private Services Access range, another connector, or a route
+  learned through peering.
 
 **4. Apply:**
 
 ```sh
 cd terraform
-terraform init
-terraform plan    # review before applying
-terraform apply
+terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
+terraform plan -var-file=envs/<env>.tfvars -out <env>.tfplan
+terraform apply <env>.tfplan
 ```
 
-**5. Check the outputs match the workflow.** `terraform output
-wif_provider_name` and `terraform output cicd_service_account_email` must equal
-`WIF_PROVIDER` and `DEPLOY_SA` in `.github/workflows/deploy.yaml`. Then push to
-`main` (or run the workflow manually) to build and deploy the real image.
+`-reconfigure` matters when you switch environments in the same checkout:
+without it, Terraform may offer to copy one environment's state into
+another's bucket. Answer **no** if it ever asks.
+
+**5. Create the GitHub Environment.** In the repository, go to Settings ->
+Environments -> New environment `<env>`, and add these variables:
+
+| Variable | Value |
+| --- | --- |
+| `PROJECT_ID` | `<project>` |
+| `REGION` | `europe-west1` |
+| `WIF_PROVIDER` | `terraform output -raw wif_provider_name` |
+| `DEPLOY_SA` | `terraform output -raw cicd_service_account_email` |
+
+Set **Deployment branches** to `main` only. For test, stage and prod, add
+**Required reviewers** (the team allowed to approve). Then push to `main`, or
+run the workflow manually, to deploy the real image.
 
 ## Deploying
 
-**Application:** push to `main`. `.github/workflows/deploy.yaml` builds the
-image, pushes it tagged with the commit SHA and `latest`, and points the Cloud
-Run Job at the new image digest. Only the `main` branch of this repository can
-authenticate to GCP.
+**Application:** merge to `main`. `.github/workflows/deploy.yaml` builds the
+image once, pushes it to dev's registry tagged with the commit SHA and
+`latest`, and points dev's Cloud Run Job at the new digest. The `test` job
+then waits for a reviewer. Once approved, it copies that same image (checked
+against the commit SHA) into test's registry and points test's job at it. A
+newer run's pending test deploy replaces an older one. Only the `main` branch
+of this repository can authenticate to GCP.
 
-**Infrastructure:** run Terraform by hand (CI does not run it):
+**Infrastructure:** run Terraform by hand, one environment at a time,
+dev first (CI does not run it):
 
 ```sh
 cd terraform
-terraform init
-terraform plan
-terraform apply
+terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
+terraform plan -var-file=envs/<env>.tfvars -out <env>.tfplan
+terraform apply <env>.tfplan
 ```
 
 **Run a rotation now** (changes real passwords):
 
 ```sh
-gcloud run jobs execute postgres-password-rotator-dev \
-  --region=europe-west1 --project=ingka-dp-sap-dev --wait
+gcloud run jobs execute postgres-password-rotator-<env> \
+  --region=europe-west1 --project=<project> --wait
 ```
 
 Logs are in Cloud Logging under resource type `cloud_run_job`, one JSON entry
@@ -201,7 +246,7 @@ logged.
 
 1. Create the secret in Secret Manager with the user's current password.
 2. Add the `user = "secret_id"` pair to `user_secret_mappings` in
-   `terraform/terraform.tfvars`.
+   `terraform/envs/<env>.tfvars`, for each environment that has the user.
 3. Make sure `postgres` can change that user's password (PostgreSQL 16:
    `GRANT <user> TO postgres WITH ADMIN OPTION;`).
-4. Run `terraform apply`.
+4. Run Terraform for each of those environments (see Deploying).

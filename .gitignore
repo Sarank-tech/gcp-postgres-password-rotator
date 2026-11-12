@@ -12,11 +12,11 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-# Local/personal variable files. terraform/terraform.tfvars holds the shared,
-# non-secret dev config and stays committed.
+# Local/personal variable files. terraform/envs/<env>.tfvars hold the shared,
+# non-secret per-environment config and stay committed.
 *.tfvars
 *.tfvars.json
-!terraform/terraform.tfvars
+!terraform/envs/*.tfvars
 
 # Keep the provider lock file so every run uses the same provider versions.
 !.terraform.lock.hcl

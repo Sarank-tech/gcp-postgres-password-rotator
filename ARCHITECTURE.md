@@ -13,17 +13,18 @@ Three separate concerns, each owned by one part of the repo:
 | Rotation logic | `rotator.py` (+ `Dockerfile`) | Push to `main` → GitHub Actions builds and deploys |
 | GCP infrastructure | `terraform/` | `terraform apply`, run by hand |
 | Delivery pipeline | `.github/workflows/deploy.yaml` | Push to `main` |
+| Environments | `terraform/envs/<env>.tfvars` + `<env>.backend.hcl`, GitHub Environments | One GCP project and one state bucket per environment (dev, test, stage, prod) |
 
 ```mermaid
 flowchart LR
     subgraph GitHub
         GH[Push to main] --> GA[GitHub Actions]
     end
-    subgraph GCP["GCP project ingka-dp-sap-dev (europe-west1)"]
+    subgraph GCP["GCP project per environment, e.g. ingka-dp-sap-dev (europe-west1)"]
         WIF[Workload Identity<br/>Federation]
         AR[(Artifact Registry<br/>rotator-repo)]
         SCH[Cloud Scheduler<br/>0 0 1 */4 *]
-        JOB[Cloud Run Job<br/>postgres-password-rotator-dev]
+        JOB[Cloud Run Job<br/>postgres-password-rotator-&lt;env&gt;]
         VPCC[Serverless VPC<br/>Access connector]
         SQL[(Cloud SQL<br/>staging-database<br/>private IP)]
         SM[(Secret Manager<br/>*_pwd secrets)]
@@ -66,14 +67,16 @@ flowchart LR
 │                               #   explicitly for pg8000 compatibility)
 ├── Dockerfile                  # python:3.11-slim, non-root, ENTRYPOINT rotator.py
 ├── .github/workflows/
-│   └── deploy.yaml             # Build → push → update Cloud Run Job on main
+│   └── deploy.yaml             # Build once → dev → test (approval), on main
 └── terraform/
     ├── main.tf                 # Backend, provider, and all resources, in
     │                           #   numbered sections (APIs, WIF, CI SA,
     │                           #   runtime SA + secret IAM, VPC connector,
     │                           #   Artifact Registry, Cloud Run Job, Scheduler)
-    ├── variables.tf            # Inputs with dev defaults
-    ├── terraform.tfvars        # Dev values (committed; no secrets)
+    ├── variables.tf            # Inputs; project_id and environment required
+    ├── envs/
+    │   ├── <env>.tfvars        # Per-environment values (committed; no secrets)
+    │   └── <env>.backend.hcl   # Per-environment state bucket and prefix
     ├── outputs.tf              # WIF provider, SA emails, registry URL, ...
     └── .terraform.lock.hcl     # Provider version lock (committed)
 ```
@@ -134,17 +137,26 @@ On each execution:
 
 ### Delivery flow
 
-`push to main` → GitHub Actions authenticates through WIF as `sa-cicd-deployer`
-→ `docker build` → push `rotator:<sha>` and `rotator:latest` →
-`gcloud run jobs update --image=rotator@sha256:<digest>`.
+`push to main` → **dev job** (GitHub Environment `dev`): authenticates through
+WIF as dev's `sa-cicd-deployer` → `docker build` → push `rotator:<sha>` and
+`rotator:latest` to dev's registry → `gcloud run jobs update
+--image=rotator@sha256:<digest>`.
+
+→ **test job** (GitHub Environment `test`, waits for a required reviewer):
+pulls that digest with dev's identity, checks its revision label equals the
+commit SHA, switches to test's WIF identity, pushes it to test's registry, and
+updates test's job to that digest. Nothing is rebuilt. Each environment keeps
+its own copy, so dev's 3-image cleanup policy can't delete an image test
+still runs. If dev's copy is cleaned up before someone approves test, the
+test job fails at the pull; approve a newer run instead.
 
 ## Identities and permissions
 
 | Service account | Used by | Permissions |
 | --- | --- | --- |
-| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
-| `sa-db-rotator-dev` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
-| `sa-rotator-scheduler-dev` | Cloud Scheduler | `roles/run.invoker` on this job only |
+| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
+| `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
+| `sa-rotator-scheduler-<env>` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
 Notes:
 
@@ -161,13 +173,13 @@ Notes:
 | --- | --- | --- |
 | Cloud SQL `staging-database` | Target database; reached on private IP from `ingka-dp-vpc-1` VPC; server requires trusted client certificates (mTLS via the Cloud SQL connector) | **Not** Terraform (data source only) |
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
-| Serverless VPC Access connector `pg-rotator-conn-dev` | Gives the job a path into `ingka-dp-vpc-1` VPC (`10.8.0.0/28`, egress `PRIVATE_RANGES_ONLY`) | Terraform |
+| Serverless VPC Access connector `pg-rotator-conn-<env>` | Gives the job a path into `ingka-dp-vpc-1` VPC (`vpc_connector_cidr`, `10.8.0.0/28` in dev; egress `PRIVATE_RANGES_ONLY`) | Terraform |
 | Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
 | Artifact Registry `rotator-repo` | Image storage; keeps the 3 newest versions, deletes all others | Terraform |
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |
-| Workload Identity Pool `github-actions-pool-dev` | Trusts `token.actions.githubusercontent.com` | Terraform |
-| GCS bucket `mdm-postgrespwd-tfstate-dev` | Terraform state (`postgres-password-rotator/dev`) | **Not** Terraform (pre-existing) |
+| Workload Identity Pool `github-actions-pool-<env>` | Trusts `token.actions.githubusercontent.com` | Terraform |
+| GCS bucket `mdm-postgrespwd-tfstate-<env>` | Terraform state (`postgres-password-rotator/<env>`) | **Not** Terraform (pre-existing) |
 
 Outbound calls from the job: Secret Manager API (public Google endpoint;
 egress is private-ranges-only, so it doesn't go through the connector) and

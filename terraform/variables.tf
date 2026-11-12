@@ -2,10 +2,11 @@
 # Core project settings
 ###############################################################################
 
+# project_id and environment have no defaults on purpose: forgetting
+# -var-file=envs/<env>.tfvars must fail instead of silently targeting dev.
 variable "project_id" {
   description = "GCP project ID that hosts the rotator."
   type        = string
-  default     = "ingka-dp-sap-dev"
 }
 
 variable "region" {
@@ -17,7 +18,11 @@ variable "region" {
 variable "environment" {
   description = "Environment suffix appended to resource names."
   type        = string
-  default     = "dev"
+
+  validation {
+    condition     = contains(["dev", "test", "stage", "prod"], var.environment)
+    error_message = "environment must be one of dev, test, stage, prod."
+  }
 }
 
 ###############################################################################
@@ -62,21 +67,21 @@ variable "github_allowed_ref" {
 }
 
 variable "wif_pool_id" {
-  description = "Workload Identity Pool ID."
+  description = "Workload Identity Pool ID. Default: github-actions-pool-<environment>."
   type        = string
-  default     = "github-actions-pool-dev"
+  default     = null
 }
 
 variable "wif_provider_id" {
-  description = "Workload Identity Pool Provider ID for GitHub Actions."
+  description = "Workload Identity Pool Provider ID for GitHub Actions. Default: github-provider-<environment>."
   type        = string
-  default     = "github-provider-dev"
+  default     = null
 }
 
 variable "tfstate_bucket" {
-  description = "GCS bucket holding Terraform state (CI/CD SA gets object access on it)."
+  description = "GCS bucket holding Terraform state (CI/CD SA gets object access on it). Default: mdm-postgrespwd-tfstate-<environment>."
   type        = string
-  default     = "mdm-postgrespwd-tfstate-dev"
+  default     = null
 }
 
 variable "cicd_project_roles" {

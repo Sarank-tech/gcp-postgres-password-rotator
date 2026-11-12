@@ -139,7 +139,7 @@ On each execution:
 
 | Service account | Used by | Permissions |
 | --- | --- | --- |
-| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/p2p-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
+| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
 | `sa-db-rotator-dev` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only |
 | `sa-rotator-scheduler-dev` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
@@ -164,7 +164,7 @@ Notes:
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |
 | Workload Identity Pool `github-actions-pool-dev` | Trusts `token.actions.githubusercontent.com` | Terraform |
-| GCS bucket `p2p-postgrespwd-tfstate-dev` | Terraform state (`postgres-password-rotator/dev`) | **Not** Terraform (pre-existing) |
+| GCS bucket `mdm-postgrespwd-tfstate-dev` | Terraform state (`postgres-password-rotator/dev`) | **Not** Terraform (pre-existing) |
 
 Outbound calls from the job: Secret Manager API (public Google endpoint;
 egress is private-ranges-only, so it doesn't go through the connector) and

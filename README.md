@@ -26,7 +26,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
   and `google-cloud-secret-manager`.
 - **Docker**: `python:3.11-slim` image, runs as a non-root user.
 - **Terraform** (`hashicorp/google ~> 5.0`): all GCP infrastructure, state in
-  GCS bucket `p2p-postgrespwd-tfstate-dev`.
+  GCS bucket `mdm-postgrespwd-tfstate-dev`.
 - **GitHub Actions**: builds and deploys on every push to `main`, authenticating
   through Workload Identity Federation (no service account keys).
 
@@ -49,8 +49,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.
 ## Local setup
 
 ```sh
-git clone https://github.com/ingka-group-digital/p2p-postgrespwd-rotator.git
-cd p2p-postgrespwd-rotator
+git clone https://github.com/ingka-group-digital/mdm-postgrespwd-rotator.git
+cd mdm-postgrespwd-rotator
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -143,10 +143,10 @@ gcloud services enable cloudresourcemanager.googleapis.com \
   serviceusage.googleapis.com --project=ingka-dp-sap-dev
 
 # State bucket (versioned, private)
-gcloud storage buckets create gs://p2p-postgrespwd-tfstate-dev \
+gcloud storage buckets create gs://mdm-postgrespwd-tfstate-dev \
   --project=ingka-dp-sap-dev --location=europe-west1 \
   --uniform-bucket-level-access --public-access-prevention
-gcloud storage buckets update gs://p2p-postgrespwd-tfstate-dev --versioning
+gcloud storage buckets update gs://mdm-postgrespwd-tfstate-dev --versioning
 ```
 
 Also required, and not created by Terraform:

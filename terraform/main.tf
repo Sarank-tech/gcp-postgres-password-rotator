@@ -16,7 +16,7 @@ terraform {
   }
 
   backend "gcs" {
-    bucket = "p2p-postgrespwd-tfstate-dev"
+    bucket = "mdm-postgrespwd-tfstate-dev"
     prefix = "postgres-password-rotator/dev"
   }
 }

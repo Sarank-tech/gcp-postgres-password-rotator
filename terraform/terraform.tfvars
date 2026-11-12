@@ -3,7 +3,7 @@ region            = "europe-west1"
 environment       = "dev"
 sql_instance_name = "testsergio"
 
-github_repository = "ingka-group-digital/p2p-postgrespwd-rotator"
+github_repository = "ingka-group-digital/mdm-postgrespwd-rotator"
 
 user_secret_mappings = {
   "postgres"    = "postgres_pwd"

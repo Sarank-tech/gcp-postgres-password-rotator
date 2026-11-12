@@ -215,8 +215,7 @@ resource "google_vpc_access_connector" "rotator" {
 # 4b. Artifact Registry
 #
 # Holds the rotator image. CI pushes a tag per commit SHA plus "latest"; the
-# cleanup policy keeps the 10 newest versions and deletes anything older than
-# 30 days beyond that.
+# cleanup policy keeps the 3 newest versions and deletes all others.
 ###############################################################################
 
 resource "google_artifact_registry_repository" "rotator" {
@@ -231,15 +230,16 @@ resource "google_artifact_registry_repository" "rotator" {
     id     = "keep-recent"
     action = "KEEP"
     most_recent_versions {
-      keep_count = 10
+      keep_count = 3
     }
   }
 
+  # Matches every version; KEEP takes precedence, so only the 3 newest stay.
   cleanup_policies {
-    id     = "delete-old"
+    id     = "delete-others"
     action = "DELETE"
     condition {
-      older_than = "2592000s" # 30 days
+      tag_state = "ANY"
     }
   }
 

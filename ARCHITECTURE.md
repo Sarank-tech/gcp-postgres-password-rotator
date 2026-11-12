@@ -163,7 +163,7 @@ Notes:
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
 | Serverless VPC Access connector `pg-rotator-conn-dev` | Gives the job a path into `ingka-dp-vpc-1` VPC (`10.8.0.0/28`, egress `PRIVATE_RANGES_ONLY`) | Terraform |
 | Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
-| Artifact Registry `rotator-repo` | Image storage; keeps 10 newest, deletes others after 30 days | Terraform |
+| Artifact Registry `rotator-repo` | Image storage; keeps the 3 newest versions, deletes all others | Terraform |
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |
 | Workload Identity Pool `github-actions-pool-dev` | Trusts `token.actions.githubusercontent.com` | Terraform |

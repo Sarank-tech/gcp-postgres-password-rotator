@@ -23,7 +23,7 @@ flowchart LR
     subgraph GCP["GCP project per environment, e.g. ingka-dp-sap-dev (europe-west1)"]
         WIF[Workload Identity<br/>Federation]
         AR[(Artifact Registry<br/>rotator-repo)]
-        SCH[Cloud Scheduler<br/>0 0 1 */4 *]
+        SCH[Cloud Scheduler<br/>0 0 1 */3 *]
         JOB[Cloud Run Job<br/>postgres-password-rotator-&lt;env&gt;]
         VPCC[Serverless VPC<br/>Access connector]
         SQL[(Cloud SQL<br/>staging-database<br/>private IP)]
@@ -188,7 +188,8 @@ job except Cloud Scheduler, through the Cloud Run Admin API.
 
 ## Known limitations
 
-- Rotations are only about every 120 days (cron can't do an exact day count).
+- Rotations are about every 90 days: quarterly on the 1st, so gaps are 90-92
+  days (cron can't do an exact day count).
 - No dry-run mode and no automated tests.
 - Applications that cache the password keep the old one until they re-read the
   secret, and the old password stops working right away. Consumers need to

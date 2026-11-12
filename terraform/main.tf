@@ -356,7 +356,7 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoker" {
 resource "google_cloud_scheduler_job" "rotator_trigger" {
   name        = "${local.job_name}-trigger"
   region      = var.region
-  description = "Triggers ${local.job_name} (~every 120 days)"
+  description = "Triggers ${local.job_name} (~every 90 days)"
   schedule    = var.schedule_cron
   time_zone   = var.schedule_time_zone
 

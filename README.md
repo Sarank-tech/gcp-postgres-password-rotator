@@ -3,7 +3,7 @@
 Rotates the passwords of PostgreSQL users on a Cloud SQL instance on a schedule
 and stores each new password in Secret Manager, with no human ever seeing it.
 
-A Cloud Run Job, triggered by Cloud Scheduler about every 120 days, connects to
+A Cloud Run Job, triggered by Cloud Scheduler about every 90 days, connects to
 Cloud SQL over its private IP, changes each user's password, and adds the new
 password as a new version of that user's secret. Applications that read the
 `latest` secret version pick up the new password on their next fetch.
@@ -14,7 +14,7 @@ password as a new version of that user's secret. Applications that read the
 | Cloud SQL instance | `staging-database` (PostgreSQL 16) |
 | Rotated users → secrets | `postgres` → `postgres_pwd`, `int_mdm_012` → `int_mdm_012_pwd`, `int_mdm_013` → `int_mdm_013_pwd`, `int_mdm_016` → `int_mdm_016_pwd` |
 | Cloud Run Job | `postgres-password-rotator-dev` |
-| Schedule | `0 0 1 */4 *` UTC (1 Jan, 1 May, 1 Sep) |
+| Schedule | `0 0 1 */3 *` UTC (1 Jan, 1 Apr, 1 Jul, 1 Oct) |
 | Image | `europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator` |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together.

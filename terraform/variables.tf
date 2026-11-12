@@ -147,9 +147,9 @@ variable "job_max_retries" {
 }
 
 variable "schedule_cron" {
-  description = "Cron for the rotation trigger. Default runs 00:00 on the 1st of Jan/May/Sep (~every 120 days)."
+  description = "Cron for the rotation trigger. Default runs 00:00 on the 1st of Jan/Apr/Jul/Oct (~every 90 days)."
   type        = string
-  default     = "0 0 1 */4 *"
+  default     = "0 0 1 */3 *"
 }
 
 variable "schedule_time_zone" {

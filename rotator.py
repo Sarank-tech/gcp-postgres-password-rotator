@@ -53,9 +53,11 @@ from google.cloud.sql.connector import Connector, IPTypes
 MIN_PASSWORD_LENGTH = 20
 SCRAM_ITERATIONS = 4096
 
-# Quotes and backslashes are excluded so the password is safe in connection
-# strings, shell scripts and SQL literals used by downstream consumers.
-PASSWORD_SYMBOLS = "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+# Excluded so the password survives downstream consumers: quotes and
+# backslashes (SQL literals, shell), "#" (comment in .env/properties files,
+# value cut off there), "$" (variable expansion), "@" and "%" (connection
+# URLs), "&" and ";" (query and connection strings).
+PASSWORD_SYMBOLS = "!()*+,-./:<=>?[]^_{|}~"
 
 logger = logging.getLogger("rotator")
 

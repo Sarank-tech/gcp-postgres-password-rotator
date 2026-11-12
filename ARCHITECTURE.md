@@ -87,7 +87,7 @@ object, the DB connection and the `SecretStore`:
 | --- | --- |
 | Logging | `JsonFormatter` writes one JSON object per line with `severity`, which Cloud Logging parses; `describe_error` scrubs secrets out of exception text |
 | Configuration | `load_config()` validates env vars into a frozen `Config`; bad config exits with code 2 |
-| Passwords | `generate_password()` (CSPRNG, all four character classes, no quotes or backslashes) and `scram_sha256_verifier()` |
+| Passwords | `generate_password()` (CSPRNG, all four character classes; no quotes, backslashes, `#`, `$`, `@`, `%`, `&` or `;`) and `scram_sha256_verifier()` |
 | SQL helpers | `quote_ident` / `quote_literal`, needed because `ALTER USER` can't take bind parameters |
 | Secret Manager | `SecretStore`: `read_latest()` and `add_version()` |
 | Database | `connect()` through the Cloud SQL Python Connector (`pg8000` driver, private IP by default) |

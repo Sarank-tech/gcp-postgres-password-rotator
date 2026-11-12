@@ -1,7 +1,7 @@
 project_id        = "ingka-dp-sap-dev"
 region            = "europe-west1"
 environment       = "dev"
-sql_instance_name = "testsergio"
+sql_instance_name = "staging-database"
 
 github_repository = "ingka-group-digital/mdm-postgrespwd-rotator"
 

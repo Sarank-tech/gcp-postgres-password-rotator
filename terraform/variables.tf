@@ -27,7 +27,7 @@ variable "environment" {
 variable "sql_instance_name" {
   description = "Name of the existing Cloud SQL for PostgreSQL instance whose users are rotated."
   type        = string
-  default     = "testsergio"
+  default     = "staging-database"
 }
 
 variable "user_secret_mappings" {

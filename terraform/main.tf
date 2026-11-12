@@ -174,6 +174,19 @@ resource "google_secret_manager_secret_iam_member" "db_rotator_version_adder" {
   member    = "serviceAccount:${google_service_account.db_rotator.email}"
 }
 
+# Connect through the Cloud SQL connector (mTLS with short-lived client
+# certificates), on the target instance only.
+resource "google_project_iam_member" "db_rotator_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.db_rotator.email}"
+
+  condition {
+    title      = "target-instance-only"
+    expression = "resource.type == \"sqladmin.googleapis.com/Instance\" && resource.name == \"projects/${var.project_id}/instances/${var.sql_instance_name}\""
+  }
+}
+
 # Fail fast if the target instance does not exist; also exposes its private IP.
 data "google_sql_database_instance" "target" {
   name = var.sql_instance_name
@@ -278,10 +291,6 @@ resource "google_cloud_run_v2_job" "rotator" {
           value = data.google_sql_database_instance.target.connection_name
         }
         env {
-          name  = "DB_PRIVATE_IP"
-          value = data.google_sql_database_instance.target.private_ip_address
-        }
-        env {
           name  = "SECRET_MAPPINGS"
           value = jsonencode(var.user_secret_mappings)
         }
@@ -297,8 +306,8 @@ resource "google_cloud_run_v2_job" "rotator" {
   }
 
   lifecycle {
-    # The job connects over the VPC connector, so the instance must have a
-    # private IP; fail the plan instead of deploying with DB_PRIVATE_IP="".
+    # The job connects to the private IP over the VPC connector; fail the
+    # plan instead of deploying a job that can never reach the instance.
     precondition {
       condition     = data.google_sql_database_instance.target.private_ip_address != ""
       error_message = "Cloud SQL instance ${var.sql_instance_name} has no private IP. Enable private IP on network ${var.vpc_network} first."

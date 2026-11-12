@@ -11,7 +11,7 @@ password as a new version of that user's secret. Applications that read the
 | Item | Value (dev) |
 | --- | --- |
 | GCP project | `ingka-dp-sap-dev` (`europe-west1`) |
-| Cloud SQL instance | `testsergio` (PostgreSQL 16) |
+| Cloud SQL instance | `staging-database` (PostgreSQL 16) |
 | Rotated users → secrets | `postgres` → `postgres_pwd`, `int_mdm_012` → `int_mdm_012_pwd`, `int_mdm_013` → `int_mdm_013_pwd`, `int_mdm_016` → `int_mdm_016_pwd` |
 | Cloud Run Job | `postgres-password-rotator-dev` |
 | Schedule | `0 0 1 */4 *` UTC (1 Jan, 1 May, 1 Sep) |
@@ -63,29 +63,27 @@ pip install -r requirements.txt
 > passwords and writes real secret versions. Point it at a throwaway user and
 > secret, never at the shared mapping below, unless you mean to rotate.
 
-The job normally reaches Cloud SQL on its private IP, which isn't reachable from
-a laptop. Locally, use the
-[Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy)
-over the public IP instead (it encrypts the connection itself):
+The job connects through the
+[Cloud SQL Python Connector](https://github.com/GoogleCloudPlatform/cloud-sql-python-connector)
+on the instance's private IP, which isn't reachable from a laptop. Locally, use
+the public IP instead (the instance must have one). The connector handles TLS
+and client certificates either way:
 
 ```sh
-# Terminal 1: proxy to localhost:5432
-cloud-sql-proxy ingka-dp-sap-dev:europe-west1:testsergio --port 5432
+gcloud auth application-default login
 
-# Terminal 2
 export PROJECT_ID=ingka-dp-sap-dev
-export INSTANCE_CONNECTION_NAME=ingka-dp-sap-dev:europe-west1:testsergio
-export DB_PRIVATE_IP=127.0.0.1
-export DB_SSL_MODE=disable          # proxy already encrypts
+export INSTANCE_CONNECTION_NAME=ingka-dp-sap-dev:europe-west1:staging-database
+export DB_IP_TYPE=public
 export DB_ADMIN_SECRET=postgres_pwd # password used to connect as postgres
 export SECRET_MAPPINGS='{"test_user": "test_user_pwd"}'
 
 python rotator.py
 ```
 
-Your own gcloud account needs `secretmanager.versions.access`/`add` on the
-secrets involved. The full list of environment variables is in the
-`rotator.py` module docstring.
+Your own gcloud account needs `roles/cloudsql.client` on the instance and
+`secretmanager.versions.access`/`add` on the secrets involved. The full list
+of environment variables is in the `rotator.py` module docstring.
 
 ## Tests and checks
 
@@ -151,7 +149,7 @@ gcloud storage buckets update gs://mdm-postgrespwd-tfstate-dev --versioning
 
 Also required, and not created by Terraform:
 
-- Cloud SQL instance `testsergio` with a **private IP** on the
+- Cloud SQL instance `staging-database` with a **private IP** on the
   `ingka-dp-vpc-1` VPC (Private Services Access set up on that network).
 - Secrets `postgres_pwd`, `int_mdm_012_pwd`, `int_mdm_013_pwd`,
   `int_mdm_016_pwd`, each holding that user's **current** password.

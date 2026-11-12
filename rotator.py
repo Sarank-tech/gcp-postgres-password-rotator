@@ -18,21 +18,21 @@ and the rollback write fail; that case is logged at CRITICAL.
 The job connects as an admin user (default ``postgres``) whose current
 password is read from its mapped secret. Passwords are never logged.
 
+The connection goes through the Cloud SQL Python Connector, which fetches a
+short-lived client certificate for mutual TLS and verifies the server's
+identity, so it works whatever SSL mode the instance enforces.
+
 Environment variables:
     PROJECT_ID                GCP project holding the secrets (required).
-    INSTANCE_CONNECTION_NAME  Cloud SQL connection name, for logs (required).
+    INSTANCE_CONNECTION_NAME  Cloud SQL connection name,
+                              "project:region:instance" (required).
     SECRET_MAPPINGS           JSON object of {db_user: secret_id} (required).
-    DB_PRIVATE_IP             Private IP of the instance (required).
-    DB_PORT                   Default 5432.
+    DB_IP_TYPE                "private" (default) or "public".
     DB_NAME                   Database to connect to. Default "postgres".
     DB_ADMIN_USER             User to connect as. Default "postgres"; must be a
                               key of SECRET_MAPPINGS unless DB_ADMIN_SECRET is
                               set.
     DB_ADMIN_SECRET           Secret ID holding the admin password (optional).
-    DB_SSL_MODE               "require" (default, encrypted, no cert check),
-                              "verify-ca" (needs DB_SSL_ROOT_CERT) or
-                              "disable".
-    DB_SSL_ROOT_CERT          Path to the instance's server CA certificate.
     PASSWORD_LENGTH           Generated password length. Default 32, min 20.
 """
 
@@ -43,13 +43,12 @@ import json
 import logging
 import os
 import secrets
-import ssl
 import string
 import sys
 from dataclasses import dataclass
 
-import pg8000.dbapi
 from google.cloud import secretmanager
+from google.cloud.sql.connector import Connector, IPTypes
 
 MIN_PASSWORD_LENGTH = 20
 SCRAM_ITERATIONS = 4096
@@ -110,13 +109,10 @@ class Config:
     project_id: str
     instance_connection_name: str
     mappings: dict
-    db_host: str
-    db_port: int
+    ip_type: IPTypes
     db_name: str
     admin_user: str
     admin_secret: str
-    ssl_mode: str
-    ssl_root_cert: str
     password_length: int
 
 
@@ -151,16 +147,13 @@ def load_config():
             "SECRET_MAPPINGS or set DB_ADMIN_SECRET"
         )
 
-    ssl_mode = os.environ.get("DB_SSL_MODE", "require")
-    ssl_root_cert = os.environ.get("DB_SSL_ROOT_CERT", "")
-    if ssl_mode not in ("require", "verify-ca", "disable"):
-        raise ConfigError(f"Unsupported DB_SSL_MODE {ssl_mode!r}")
-    if ssl_mode == "verify-ca" and not ssl_root_cert:
-        raise ConfigError("DB_SSL_MODE=verify-ca requires DB_SSL_ROOT_CERT")
+    ip_types = {"private": IPTypes.PRIVATE, "public": IPTypes.PUBLIC}
+    ip_type_name = os.environ.get("DB_IP_TYPE", "private").strip().lower()
+    if ip_type_name not in ip_types:
+        raise ConfigError(f"Unsupported DB_IP_TYPE {ip_type_name!r}")
 
     try:
         password_length = int(os.environ.get("PASSWORD_LENGTH", "32"))
-        db_port = int(os.environ.get("DB_PORT", "5432"))
     except ValueError as exc:
         raise ConfigError(f"Invalid integer setting: {exc}") from exc
     if password_length < MIN_PASSWORD_LENGTH:
@@ -170,13 +163,10 @@ def load_config():
         project_id=_require_env("PROJECT_ID"),
         instance_connection_name=_require_env("INSTANCE_CONNECTION_NAME"),
         mappings=mappings,
-        db_host=_require_env("DB_PRIVATE_IP"),
-        db_port=db_port,
+        ip_type=ip_types[ip_type_name],
         db_name=os.environ.get("DB_NAME", "postgres"),
         admin_user=admin_user,
         admin_secret=admin_secret,
-        ssl_mode=ssl_mode,
-        ssl_root_cert=ssl_root_cert,
         password_length=password_length,
     )
 
@@ -272,29 +262,13 @@ class SecretStore:
 # Database
 ###############################################################################
 
-def build_ssl_context(config):
-    if config.ssl_mode == "disable":
-        return None
-    if config.ssl_mode == "verify-ca":
-        # Cloud SQL server certs don't carry the IP as a SAN, so only the CA
-        # chain is verified, matching libpq's verify-ca semantics.
-        context = ssl.create_default_context(cafile=config.ssl_root_cert)
-        context.check_hostname = False
-        return context
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
-
-
-def connect(config, admin_password):
-    return pg8000.dbapi.connect(
-        host=config.db_host,
-        port=config.db_port,
-        database=config.db_name,
+def connect(connector, config, admin_password):
+    return connector.connect(
+        config.instance_connection_name,
+        "pg8000",
         user=config.admin_user,
         password=admin_password,
-        ssl_context=build_ssl_context(config),
+        db=config.db_name,
         timeout=30,
         application_name="postgres-password-rotator",
     )
@@ -399,10 +373,19 @@ def main():
         users=list(config.mappings), admin_user=config.admin_user)
 
     store = SecretStore(config.project_id)
+    # Lazy refresh: the job is short-lived, so fetch the client certificate
+    # on connect instead of refreshing it on a background thread.
+    with Connector(ip_type=config.ip_type,
+                   refresh_strategy="lazy") as connector:
+        return rotate_all(connector, store, config)
+
+
+def rotate_all(connector, store, config):
+    """Connect as the admin user and rotate every mapped user."""
     admin_password = None
     try:
         admin_password = store.read_latest(config.admin_secret)
-        conn = connect(config, admin_password)
+        conn = connect(connector, config, admin_password)
     except Exception as exc:
         log(logging.CRITICAL, "Could not connect to the database",
             instance=config.instance_connection_name,

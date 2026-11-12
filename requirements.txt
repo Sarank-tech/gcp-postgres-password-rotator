@@ -4,3 +4,6 @@ pg8000==1.31.2
 # which pg8000 calls on SSL connections. Pin to the last compatible release.
 scramp==1.4.17
 google-auth==2.29.0
+# 1.23+ depends on google-cloud-sql, which needs protobuf>=6; the pinned
+# google-cloud-secret-manager needs protobuf<6.
+cloud-sql-python-connector[pg8000]==1.22.0

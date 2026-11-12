@@ -25,7 +25,7 @@ flowchart LR
         SCH[Cloud Scheduler<br/>0 0 1 */4 *]
         JOB[Cloud Run Job<br/>postgres-password-rotator-dev]
         VPCC[Serverless VPC<br/>Access connector]
-        SQL[(Cloud SQL<br/>testsergio<br/>private IP)]
+        SQL[(Cloud SQL<br/>staging-database<br/>private IP)]
         SM[(Secret Manager<br/>*_pwd secrets)]
     end
     GA -- OIDC token --> WIF
@@ -90,7 +90,7 @@ object, the DB connection and the `SecretStore`:
 | Passwords | `generate_password()` (CSPRNG, all four character classes, no quotes or backslashes) and `scram_sha256_verifier()` |
 | SQL helpers | `quote_ident` / `quote_literal`, needed because `ALTER USER` can't take bind parameters |
 | Secret Manager | `SecretStore`: `read_latest()` and `add_version()` |
-| Database | `connect()` with `build_ssl_context()` (`require` / `verify-ca` / `disable`) |
+| Database | `connect()` through the Cloud SQL Python Connector (`pg8000` driver, private IP by default) |
 | Rotation | `rotate_user()`, plus `rotation_order()` and `main()` |
 
 ## Data flow
@@ -98,8 +98,11 @@ object, the DB connection and the `SecretStore`:
 On each execution:
 
 1. **Start-up.** `main()` loads config from the environment, reads the admin
-   (`postgres`) password from its secret, and opens one TLS connection to
-   `DB_PRIVATE_IP:5432` as `postgres`.
+   (`postgres`) password from its secret, and opens one connection as
+   `postgres` through the Cloud SQL connector. The connector looks up the
+   instance's private IP, gets a short-lived client certificate from the Cloud
+   SQL Admin API, and connects with mutual TLS on port 3307. That works even
+   when the instance requires trusted client certificates.
 2. **Order.** Users are processed in `SECRET_MAPPINGS` order, with the admin
    user moved to the end.
 3. **Per user** (`rotate_user`):
@@ -140,7 +143,7 @@ On each execution:
 | Service account | Used by | Permissions |
 | --- | --- | --- |
 | `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Artifact Registry writer, Cloud Build editor, Scheduler admin, VPC Access user; object admin on the state bucket; `actAs` on `sa-db-rotator-dev` only |
-| `sa-db-rotator-dev` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only |
+| `sa-db-rotator-dev` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
 | `sa-rotator-scheduler-dev` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
 Notes:
@@ -156,7 +159,7 @@ Notes:
 
 | Dependency | Purpose | Managed by |
 | --- | --- | --- |
-| Cloud SQL `testsergio` | Target database; reached on private IP from `ingka-dp-vpc-1` VPC; server only accepts encrypted connections | **Not** Terraform (data source only) |
+| Cloud SQL `staging-database` | Target database; reached on private IP from `ingka-dp-vpc-1` VPC; server requires trusted client certificates (mTLS via the Cloud SQL connector) | **Not** Terraform (data source only) |
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
 | Serverless VPC Access connector `pg-rotator-conn-dev` | Gives the job a path into `ingka-dp-vpc-1` VPC (`10.8.0.0/28`, egress `PRIVATE_RANGES_ONLY`) | Terraform |
 | Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
@@ -175,8 +178,6 @@ job except Cloud Scheduler, through the Cloud Run Admin API.
 
 - Rotations are only about every 120 days (cron can't do an exact day count).
 - No dry-run mode and no automated tests.
-- `DB_PRIVATE_IP` is set when Terraform applies; if the instance's private IP
-  changes, re-run `terraform apply`.
 - Applications that cache the password keep the old one until they re-read the
   secret, and the old password stops working right away. Consumers need to
   re-fetch the secret when authentication fails.

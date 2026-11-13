@@ -80,8 +80,9 @@ flowchart LR
 2. Authenticates **as dev** and pulls the exact digest dev deployed.
 3. Fails if the image's revision label isn't this run's commit SHA.
 4. Authenticates **as test** and points test's Cloud Run Job at that digest in
-   dev's registry. Test's Cloud Run service agent has read access to dev's
-   registry (granted by dev's Terraform, `image_reader_project_numbers`).
+   dev's registry. Test's Cloud Run service agent and test's deployer both
+   have read access to dev's registry (granted by dev's Terraform,
+   `image_reader_projects`).
 5. Authenticates **as dev** again and tags the image `deployed-test`, so dev's
    cleanup policy keeps it while test runs it. The tag moves with each
    promotion.
@@ -207,8 +208,9 @@ commit (a new digest), and the test job re-promotes it after approval.
 2. Add `terraform/envs/<env>.tfvars` (with `create_artifact_registry = false`)
    and `terraform/envs/<env>.backend.hcl`.
 3. Run the first Terraform apply locally (see Infrastructure changes).
-4. Add the new project's number to `image_reader_project_numbers` in
-   `envs/dev.tfvars` and apply dev.
+4. Add the new project (`"<project-id>" = "<project-number>"`) to
+   `image_reader_projects` in `envs/dev.tfvars` and apply dev, after the new
+   environment's apply (its `sa-cicd-deployer` must exist).
 5. Create the GitHub Environment with its variables, `main`-only deployment
    branches and required reviewers.
 6. Add a `<env>` job to `deploy.yaml`, copied from the `test` job, with
@@ -222,6 +224,6 @@ commit (a new digest), and the test job re-promotes it after approval.
 | `Variable X is not set on the <env> environment` | GitHub Environment missing or a variable not added |
 | Auth step fails with `unauthorized_client` / `permission denied` | Wrong `WIF_PROVIDER`/`DEPLOY_SA`, workflow not running from `main`, or repository name changed without updating `github_repository` in tfvars |
 | Test job fails pulling the image | Dev's cleanup removed that digest; approve a newer run |
-| Test job update fails with an image permission error | Test's project number missing from `image_reader_project_numbers` in `envs/dev.tfvars`, or dev not applied since |
+| Test job update fails with `artifactregistry.repositories.downloadArtifacts` denied | Test's project missing from `image_reader_projects` in `envs/dev.tfvars`, or dev not applied since |
 | `Image revision ... does not match commit` | Dev's output points at an image built from another commit; re-run the whole workflow |
 | Deploy succeeds but rotation fails to connect | Not a pipeline problem: check the job's logs (Cloud SQL permissions, network path, instance SSL mode) |

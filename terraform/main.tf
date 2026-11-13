@@ -278,14 +278,24 @@ moved {
   to   = google_artifact_registry_repository.rotator[0]
 }
 
-# Cloud Run in the other environments pulls images with its service agent.
+# Cloud Run in the other environments pulls images with its service agent...
 resource "google_artifact_registry_repository_iam_member" "image_readers" {
-  for_each = var.create_artifact_registry ? toset(var.image_reader_project_numbers) : toset([])
+  for_each = var.create_artifact_registry ? toset(values(var.image_reader_projects)) : toset([])
 
   location   = google_artifact_registry_repository.rotator[0].location
   repository = google_artifact_registry_repository.rotator[0].name
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:service-${each.value}@serverless-robot-prod.iam.gserviceaccount.com"
+}
+
+# ...and Cloud Run checks that whoever deploys the job can read the image too.
+resource "google_artifact_registry_repository_iam_member" "image_deployers" {
+  for_each = var.create_artifact_registry ? toset(keys(var.image_reader_projects)) : toset([])
+
+  location   = google_artifact_registry_repository.rotator[0].location
+  repository = google_artifact_registry_repository.rotator[0].name
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:sa-cicd-deployer@${each.value}.iam.gserviceaccount.com"
 }
 
 ###############################################################################

@@ -107,10 +107,10 @@ variable "create_artifact_registry" {
   default     = true
 }
 
-variable "image_reader_project_numbers" {
-  description = "Project numbers of the environments that run images from this project's registry. Their Cloud Run service agent gets read access."
-  type        = list(string)
-  default     = []
+variable "image_reader_projects" {
+  description = "Environments that run images from this project's registry, as project ID => project number. Their Cloud Run service agent (pulls the image) and sa-cicd-deployer (deploys it) get read access."
+  type        = map(string)
+  default     = {}
 }
 
 ###############################################################################

@@ -163,6 +163,7 @@ instead.
 | --- | --- | --- |
 | `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Cloud Build editor, Scheduler admin, VPC Access user, Artifact Registry writer (dev only); object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
 | Cloud Run service agent of test (and later envs) | Cloud Run, pulling the image | `roles/artifactregistry.reader` on dev's `rotator-repo` only |
+| `sa-cicd-deployer` of test (and later envs) | GitHub Actions, deploying that env's job | Also `roles/artifactregistry.reader` on dev's `rotator-repo` only |
 | `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionManager` (add, list and disable versions) on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
 | `sa-rotator-scheduler-<env>` | Cloud Scheduler | `roles/run.invoker` on this job only |
 

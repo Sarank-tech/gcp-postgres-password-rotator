@@ -150,8 +150,9 @@ resource "google_service_account_iam_member" "cicd_wif_binding" {
 ###############################################################################
 # 3. Runtime service account & secret access
 #
-# The Cloud Run Job runs as sa-db-rotator-<env> and can only read and add
-# versions of the mapped password secrets (not every secret in the project).
+# The Cloud Run Job runs as sa-db-rotator-<env> and can only read, add and
+# disable versions of the mapped password secrets (not every secret in the
+# project).
 ###############################################################################
 
 resource "google_service_account" "db_rotator" {
@@ -165,7 +166,8 @@ data "google_secret_manager_secret" "mapped" {
   secret_id = each.value
 }
 
-# Read the current password and add new versions, on mapped secrets only.
+# Read the current password, add new versions and disable the older ones,
+# on mapped secrets only.
 resource "google_secret_manager_secret_iam_member" "db_rotator_accessor" {
   for_each = data.google_secret_manager_secret.mapped
 
@@ -175,12 +177,12 @@ resource "google_secret_manager_secret_iam_member" "db_rotator_accessor" {
   member    = "serviceAccount:${google_service_account.db_rotator.email}"
 }
 
-resource "google_secret_manager_secret_iam_member" "db_rotator_version_adder" {
+resource "google_secret_manager_secret_iam_member" "db_rotator_version_manager" {
   for_each = data.google_secret_manager_secret.mapped
 
   project   = var.project_id
   secret_id = each.value.secret_id
-  role      = "roles/secretmanager.secretVersionAdder"
+  role      = "roles/secretmanager.secretVersionManager"
   member    = "serviceAccount:${google_service_account.db_rotator.email}"
 }
 
@@ -364,7 +366,7 @@ resource "google_cloud_run_v2_job" "rotator" {
   depends_on = [
     google_project_service.apis,
     google_secret_manager_secret_iam_member.db_rotator_accessor,
-    google_secret_manager_secret_iam_member.db_rotator_version_adder,
+    google_secret_manager_secret_iam_member.db_rotator_version_manager,
   ]
 }
 

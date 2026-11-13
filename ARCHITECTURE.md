@@ -34,7 +34,7 @@ flowchart LR
     GA -- update image --> JOB
     SCH -- "POST :run (OAuth)" --> JOB
     AR -. pull .-> JOB
-    JOB -- read / add versions --> SM
+    JOB -- read / add / disable versions --> SM
     JOB --> VPCC -- "SQL over TLS" --> SQL
 ```
 
@@ -120,6 +120,7 @@ On each execution:
        R->>DB: ALTER USER ... WITH PASSWORD '<verifier>' (uncommitted)
        R->>SM: add version (new password)
        R->>DB: COMMIT
+       R->>SM: disable all older enabled versions
    ```
 
    - Secret write fails → the transaction is **rolled back**; DB and secret
@@ -127,6 +128,10 @@ On each execution:
    - `COMMIT` fails → the old password is **re-added** as the latest secret
      version, so the secret matches the DB again.
    - Both of those fail → logged at `CRITICAL`; needs manual repair.
+   - After a successful commit, every older enabled version is **disabled**,
+     so only the current password can be read. If that fails it's logged as a
+     `WARNING` and the rotation still counts as succeeded (DB and secret
+     already match); disable the leftovers by hand.
 
    Only the SCRAM verifier, a salted hash, is sent to PostgreSQL. The plaintext
    password exists only in the job's memory and in Secret Manager, so it can't
@@ -158,7 +163,7 @@ instead.
 | --- | --- | --- |
 | `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Cloud Build editor, Scheduler admin, VPC Access user, Artifact Registry writer (dev only); object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
 | Cloud Run service agent of test (and later envs) | Cloud Run, pulling the image | `roles/artifactregistry.reader` on dev's `rotator-repo` only |
-| `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionAdder` on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
+| `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionManager` (add, list and disable versions) on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
 | `sa-rotator-scheduler-<env>` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
 Notes:

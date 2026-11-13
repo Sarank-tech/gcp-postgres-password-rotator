@@ -82,7 +82,8 @@ python rotator.py
 ```
 
 Your own gcloud account needs `roles/cloudsql.client` on the instance and
-`secretmanager.versions.access`/`add` on the secrets involved. The full list
+`secretmanager.versions.access`/`add`/`list`/`disable` on the secrets
+involved. The full list
 of environment variables is in the `rotator.py` module docstring.
 
 ## Tests and checks

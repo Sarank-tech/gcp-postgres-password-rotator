@@ -11,6 +11,9 @@ Runs as a Cloud Run Job. For each ``user -> secret`` pair in SECRET_MAPPINGS:
 4. Add the new password as a new Secret Manager version.
 5. Commit. If the commit fails, re-add the old password as the latest secret
    version so the secret keeps matching the database.
+6. Disable every older enabled version of the secret, so only the current
+   password can be read. Failing this step is logged as a warning: the
+   database and the secret already match, so the rotation still counts.
 
 Steps 3-5 mean the database and secret can only disagree if both the commit
 and the rollback write fail; that case is logged at CRITICAL.
@@ -259,6 +262,27 @@ class SecretStore:
         )
         return response.name
 
+    def disable_other_versions(self, secret_id, keep_version):
+        """Disable every enabled version except ``keep_version``.
+
+        Returns the names of the versions disabled.
+        """
+        keep_id = keep_version.rsplit("/", 1)[-1]
+        disabled = []
+        for version in self._client.list_secret_versions(
+            request={
+                "parent": self._secret_path(secret_id),
+                "filter": "state:ENABLED",
+            }
+        ):
+            if version.name.rsplit("/", 1)[-1] == keep_id:
+                continue
+            self._client.disable_secret_version(
+                request={"name": version.name}
+            )
+            disabled.append(version.name)
+        return disabled
+
 
 ###############################################################################
 # Database
@@ -330,7 +354,20 @@ def rotate_user(conn, store, config, username, secret_id):
         return False
 
     log(logging.INFO, "Rotation succeeded", step="done", **ctx)
+    _disable_old_versions(store, secret_id, version, ctx)
     return True
+
+
+def _disable_old_versions(store, secret_id, keep_version, ctx):
+    try:
+        disabled = store.disable_other_versions(secret_id, keep_version)
+        log(logging.INFO, "Disabled previous secret versions",
+            step="disable_versions", disabled_versions=disabled, **ctx)
+    except Exception as exc:
+        log(logging.WARNING,
+            "Could not disable previous secret versions; disable them "
+            "manually",
+            step="disable_versions", error=type(exc).__name__, **ctx)
 
 
 def _safe_rollback(conn, ctx):

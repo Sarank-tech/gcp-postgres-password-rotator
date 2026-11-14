@@ -298,6 +298,18 @@ moved {
   to   = google_artifact_registry_repository.rotator[0]
 }
 
+# CI moves tags (latest, deployed-<env>) and removes candidate tags. Moving a
+# tag deletes it from the old version, which artifactregistry.writer can't
+# do; repoAdmin can, on this repository only.
+resource "google_artifact_registry_repository_iam_member" "cicd_tag_manager" {
+  count = var.create_artifact_registry ? 1 : 0
+
+  location   = google_artifact_registry_repository.rotator[0].location
+  repository = google_artifact_registry_repository.rotator[0].name
+  role       = "roles/artifactregistry.repoAdmin"
+  member     = "serviceAccount:${google_service_account.cicd_deployer.email}"
+}
+
 # Cloud Run in the other environments pulls images with its service agent...
 resource "google_artifact_registry_repository_iam_member" "image_readers" {
   for_each = var.create_artifact_registry ? toset(values(var.image_reader_projects)) : toset([])

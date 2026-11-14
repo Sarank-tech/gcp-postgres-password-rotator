@@ -25,17 +25,22 @@ job_name() {
   echo "postgres-password-rotator-$1"
 }
 
-# Prints the tags on image digest $2 in repository image $1 (one per line).
-image_tags() {
-  gcloud artifacts docker images list "$1" --include-tags \
-    --filter="version=$2" --format=json \
-    | jq -r '.[0].tags // [] | if type == "array" then .[] else split(",")[] end'
+# Prints every tag of image $1 as "<tag> <digest>" lines. Uses tags list,
+# which only reads tags ("images describe" also reads vulnerability data and
+# needs Container Analysis permissions the deployer doesn't have).
+all_tags() {
+  gcloud artifacts docker tags list "$1" --format=json \
+    | jq -r '.[] | "\(.tag | split("/") | last) \(.version | split("/") | last)"'
 }
 
-# Prints the digest (sha256:...) that tag $2 points at in image $1.
+# Prints the tags on image digest $2 (sha256:...) in image $1, one per line.
+image_tags() {
+  all_tags "$1" | awk -v d="$2" '$2 == d { print $1 }'
+}
+
+# Prints the digest (sha256:...) that tag $2 points at in image $1, if any.
 tag_digest() {
-  gcloud artifacts docker images describe "$1:$2" \
-    --format='value(image_summary.digest)'
+  all_tags "$1" | awk -v t="$2" '$1 == t { print $2 }'
 }
 
 # Fails unless deploy/<env>.json at $1 is a valid promotion record.

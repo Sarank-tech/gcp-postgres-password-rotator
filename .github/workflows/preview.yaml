@@ -111,6 +111,12 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      # For .github/scripts/promotion.sh only.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
@@ -122,6 +128,7 @@ jobs:
 
       - name: Put dev back on the latest main build
         run: |
+          source .github/scripts/promotion.sh
           running_pr="$(gcloud run jobs describe "${JOB_NAME}" \
             --project="${PROJECT_ID}" --region="${REGION}" \
             --format='value(metadata.labels.preview_pr)')"
@@ -130,7 +137,8 @@ jobs:
             exit 0
           fi
           image="${REPO}/rotator"
-          digest="$(gcloud artifacts docker images describe "${image}:latest" --format='value(image_summary.digest)')"
+          digest="$(tag_digest "${image}" latest)"
+          [ -n "${digest}" ] || { echo "::error::No latest build of main found"; exit 1; }
           gcloud run jobs update "${JOB_NAME}" \
             --project="${PROJECT_ID}" \
             --region="${REGION}" \

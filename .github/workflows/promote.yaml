@@ -90,7 +90,7 @@ jobs:
               build="$(image_tags "${image}" "$(tag_digest "${image}" latest)" | sed -n 's/^build-\([0-9]*\)$/\1/p' | head -1)" || true
             fi
             [[ "${build}" =~ ^[0-9]+$ ]] || { echo "::error::No build found to promote"; exit 1; }
-            digest="$(tag_digest "${image}" "build-${build}" 2>/dev/null)" || true
+            digest="$(tag_digest "${image}" "build-${build}")" || true
             [ -n "${digest}" ] || { echo "::error::Build ${build} not found in the registry (never reached dev, or cleaned up)"; exit 1; }
           else
             source_file="deploy/${from}.json"

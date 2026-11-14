@@ -37,7 +37,8 @@ jobs:
         run: |
           source .github/scripts/promotion.sh
           changed="$(git diff --name-only origin/main...HEAD)"
-          promotions="$(grep '^deploy/' <<< "${changed}" || true)"
+          # Only deploy/<env>.json records count; deploy/README.md etc. don't.
+          promotions="$(grep -E '^deploy/[^/]+\.json$' <<< "${changed}" || true)"
           if [ -z "${promotions}" ]; then
             echo "Not a promotion PR; nothing to check."
             exit 0

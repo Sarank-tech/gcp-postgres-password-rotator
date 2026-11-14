@@ -1,0 +1,200 @@
+name: Create promotion PR
+
+# The "button" for promoting a build to the next environment. Opens a PR that
+# changes only deploy/<env>.json to point at an existing build; merging that
+# PR deploys it (deploy.yaml). Nothing is rebuilt.
+#
+#   test   any build of main that reached dev (default: the newest)
+#   stage  the build test runs now
+#   prod   the build stage runs now
+# Rollback: give an earlier build the environment ran before.
+#
+# Requires: Settings -> Actions -> General -> "Allow GitHub Actions to create
+# and approve pull requests", and the REGISTRY_* repository variables.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to promote to
+        type: choice
+        # Add stage and prod here when they exist (and in promotion.sh).
+        options: [test]
+      build:
+        description: "Build number. Empty: newest in dev (test), or what the previous env runs. Earlier build: rollback"
+        type: string
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  id-token: write
+
+concurrency:
+  group: promote-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TARGET: ${{ inputs.environment }}
+      BUILD_INPUT: ${{ inputs.build }}
+      REPO: ${{ vars.REGISTRY_REPO }}
+      REGISTRY_WIF_PROVIDER: ${{ vars.REGISTRY_WIF_PROVIDER }}
+      REGISTRY_DEPLOY_SA: ${{ vars.REGISTRY_DEPLOY_SA }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check repository variables
+        run: |
+          for name in REPO REGISTRY_WIF_PROVIDER REGISTRY_DEPLOY_SA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository variable ${name/#REPO/REGISTRY_REPO} is not set"
+              exit 1
+            fi
+          done
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Dev's identity: the registry lives in dev.
+      - name: Authenticate to the registry
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.REGISTRY_WIF_PROVIDER }}
+          service_account: ${{ vars.REGISTRY_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Work out what to promote
+        id: plan
+        run: |
+          source .github/scripts/promotion.sh
+          is_enabled "${TARGET}" || { echo "::error::${TARGET} is not enabled (promotion.sh)"; exit 1; }
+          from="$(previous_env "${TARGET}")"
+          image="${REPO}/rotator"
+
+          if [ "${from}" = "dev" ]; then
+            # Any build that reached dev; build-<n> tags are added after the
+            # dev deploy succeeds.
+            if [ -n "${BUILD_INPUT}" ]; then
+              build="${BUILD_INPUT}"
+            else
+              build="$(image_tags "${image}" "$(tag_digest "${image}" latest)" | sed -n 's/^build-\([0-9]*\)$/\1/p' | head -1)" || true
+            fi
+            [[ "${build}" =~ ^[0-9]+$ ]] || { echo "::error::No build found to promote"; exit 1; }
+            digest="$(tag_digest "${image}" "build-${build}" 2>/dev/null)" || true
+            [ -n "${digest}" ] || { echo "::error::Build ${build} not found in the registry (never reached dev, or cleaned up)"; exit 1; }
+          else
+            source_file="deploy/${from}.json"
+            [ -f "${source_file}" ] || { echo "::error::Nothing recorded in ${from} yet"; exit 1; }
+            check_record "${source_file}" "${REPO}"
+            build="$(jq -r .build "${source_file}")"
+            digest="$(jq -r .image "${source_file}")"
+            if [ -n "${BUILD_INPUT}" ] && [ "${BUILD_INPUT}" != "${build}" ]; then
+              # Not what the previous env runs: only allowed as a rollback.
+              earlier="$(earlier_record "${TARGET}" "${BUILD_INPUT}" origin/main)" || {
+                echo "::error::${TARGET} can only get the build ${from} runs (build ${build}), or roll back to a build it ran before"
+                exit 1
+              }
+              build="${BUILD_INPUT}"
+              digest="$(jq -r .image <<< "${earlier}")"
+            fi
+            digest="${digest#*@}"
+          fi
+
+          commit="$(image_tags "${image}" "${digest}" | grep -E '^[0-9a-f]{40}$' | head -1)" || true
+          [ -n "${commit}" ] || { echo "::error::Can't find the commit for build ${build}"; exit 1; }
+          git merge-base --is-ancestor "${commit}" origin/main \
+            || { echo "::error::Build ${build} (${commit}) isn't from main"; exit 1; }
+          summary="$(git log -1 --format=%s "${commit}")"
+
+          target_file="deploy/${TARGET}.json"
+          current_build="" current_commit=""
+          if [ -f "${target_file}" ]; then
+            current_build="$(jq -r .build "${target_file}")"
+            current_commit="$(jq -r .commit "${target_file}")"
+          fi
+          [ "${current_build}" != "${build}" ] || { echo "::error::${TARGET} already runs build ${build}"; exit 1; }
+
+          branch="promote/${TARGET}-build-${build}"
+          if git ls-remote --exit-code --heads origin "${branch}" > /dev/null; then
+            echo "::error::Branch ${branch} already exists; a PR for this promotion is probably open"
+            exit 1
+          fi
+
+          jq -n --argjson build "${build}" --arg commit "${commit}" \
+            --arg image "${image}@${digest}" --arg summary "${summary}" \
+            '{build: $build, commit: $commit, image: $image, summary: $summary}' > "${target_file}"
+
+          # PR description: what's in it compared with what the env runs now.
+          server="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          {
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Environment | **${TARGET}** |"
+            echo "| Build | **${build}** ([\`${commit::7}\`](${server}/commit/${commit})) |"
+            echo "| Image | \`${image}@${digest}\` |"
+            echo "| Comes from | ${from} |"
+            echo "| ${TARGET} runs now | ${current_build:+build }${current_build:-nothing recorded} |"
+            echo ""
+            if [ -z "${current_commit}" ]; then
+              echo "### Changes"
+              echo "First recorded promotion to ${TARGET}."
+            elif git merge-base --is-ancestor "${current_commit}" "${commit}"; then
+              echo "### Changes since build ${current_build}"
+              git log --first-parent --format='- %s (%h)' "${current_commit}..${commit}" -- . ':(exclude)deploy'
+            else
+              echo "### ⚠️ Rollback from build ${current_build} to build ${build}"
+              echo "Changes being removed from ${TARGET}:"
+              git log --first-parent --format='- %s (%h)' "${commit}..${current_commit}" -- . ':(exclude)deploy'
+            fi
+            echo ""
+            echo "### Sanity checklist (after merge and deploy)"
+            echo "- [ ] Job executed once in ${TARGET}"
+            echo "- [ ] \"Rotation succeeded\" for all users in the logs"
+            echo "- [ ] Only the newest version of each secret is enabled"
+          } > "${RUNNER_TEMP}/body.md"
+
+          {
+            echo "build=${build}"
+            echo "digest=${digest}"
+            echo "branch=${branch}"
+            echo "title=Promote build ${build} to ${TARGET} — ${summary}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Open the PR
+        env:
+          BUILD: ${{ steps.plan.outputs.build }}
+          DIGEST: ${{ steps.plan.outputs.digest }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+          TITLE: ${{ steps.plan.outputs.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${BRANCH}"
+          git add "deploy/${TARGET}.json"
+          git commit -m "${TITLE}"
+          git push origin "${BRANCH}"
+
+          gh label create promotion --color 0E8A16 --description "Promotes a build to an environment" --force
+          gh label create "env:${TARGET}" --color 1D76DB --force
+          url="$(gh pr create --base main --head "${BRANCH}" --title "${TITLE}" \
+            --body-file "${RUNNER_TEMP}/body.md" --label promotion --label "env:${TARGET}")"
+
+          # Protect the build from cleanup while the PR is open.
+          gcloud artifacts docker tags add "${REPO}/rotator@${DIGEST}" \
+            "${REPO}/rotator:candidate-${TARGET}-build-${BUILD}" --quiet
+
+          # PRs opened with GITHUB_TOKEN don't trigger pull_request workflows,
+          # so start the check explicitly; it reports on the PR's commit.
+          gh workflow run promotion-check.yaml --ref "${BRANCH}"
+
+          echo "### Opened ${url}" >> "${GITHUB_STEP_SUMMARY}"

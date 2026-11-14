@@ -116,15 +116,15 @@ Terraform state. The code is the same everywhere; only
 
 | Env | GCP project | Deploy |
 | --- | --- | --- |
-| dev | `ingka-dp-sap-dev` | Automatic on every push to `main` |
-| test | `ingka-dp-sap-test` | Same image as dev, after one approval click |
-| stage | _not set up yet_ | Approval required |
-| prod | _not set up yet_ | Approval required |
+| dev | `ingka-dp-sap-dev` | Automatic on every merge to `main`, or a PR preview |
+| test | `ingka-dp-sap-test` | Approved promotion PR, same image as dev |
+| stage | _not set up yet_ | Approved promotion PR |
+| prod | _not set up yet_ | Approved promotion PR |
 
-Branching is trunk-based: `main` is the only long-lived branch, with
-short-lived `feature/*` and `fix/*` branches merged through PRs. Environments
-are deployment targets, not branches. The image is built once, and later
-environments get that exact image by digest.
+`main` is the only long-lived code branch, with short-lived `feature/*` and
+`fix/*` branches merged through PRs. The image is built once per merge, and
+each higher environment gets that exact image through its own promotion PR.
+The `prod` branch is the confirmed production copy. See [CICD.md](CICD.md).
 
 ## First-time environment setup
 
@@ -208,20 +208,25 @@ Environments -> New environment `<env>`, and add these variables:
 | `WIF_PROVIDER` | `terraform output -raw wif_provider_name` |
 | `DEPLOY_SA` | `terraform output -raw cicd_service_account_email` |
 
-Set **Deployment branches** to `main` only. For test, stage and prod, add
-**Required reviewers** (the team allowed to approve). Then push to `main`, or
-run the workflow manually, to deploy the real image.
+Set **Deployment branches** to `main` only (dev: no restriction, for PR
+previews). Approvals happen on the promotion PRs, so environment reviewers
+are optional. Use environment *variables*, not secrets. The other GitHub
+settings (repository variables, branch protection, labels) are listed in
+[CICD.md](CICD.md#github-settings).
 
 ## Deploying
 
-**Application:** merge to `main`. `.github/workflows/deploy.yaml` builds the
-image once, pushes it to dev's registry tagged with the commit SHA and
-`latest`, and points dev's Cloud Run Job at the new digest. The `test` job
-then waits for a reviewer. Once approved, it points test's job at that same
-image in dev's registry (checked against the commit SHA; nothing is copied)
-and tags it `deployed-test` so dev's cleanup keeps it. A newer run's pending
-test deploy replaces an older one. Only the `main` branch
-of this repository can authenticate to GCP.
+**Application:**
+
+1. Optional: label your PR `deploy-dev` to try it in dev before review.
+2. Merge to `main`: builds **build N** once and deploys it to dev.
+3. Actions → **Create promotion PR** → pick the environment. Approve and
+   merge the PR it opens to deploy that build there.
+4. After the prod sanity check: Actions → **Confirm prod stable**.
+
+Details, rollback and disaster restore: [CICD.md](CICD.md). Only `main` of
+this repository can authenticate to test, stage and prod; PRs can reach dev
+only.
 
 **Infrastructure:** run Terraform by hand, one environment at a time,
 dev first (CI does not run it):

@@ -1,0 +1,140 @@
+name: PR preview in dev
+
+# Lets a developer try an open PR in dev before it is merged. While the PR
+# has the "deploy-dev" label, every push builds a throwaway preview image
+# (pr-rotator, never promotable) and deploys it to dev. No approval needed:
+# review and approval are for merging into main.
+#
+# Dev returns to the latest main build when the label is removed, the PR is
+# closed or merged, or someone runs this workflow manually ("Reset dev to
+# main").
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ vars.PROJECT_ID }}
+  REGION: ${{ vars.REGION }}
+  REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
+  REPO: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo
+  JOB_NAME: postgres-password-rotator-dev
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+
+jobs:
+  preview:
+    # Labelled PRs from this repository (fork PRs get no cloud credentials).
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.action != 'unlabeled' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'deploy-dev') &&
+      contains(github.event.pull_request.labels.*.name, 'deploy-dev') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: dev
+
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Build and push preview image
+        id: push
+        run: |
+          gcloud auth configure-docker "${REGISTRY}" --quiet
+          image="${REPO}/pr-rotator"
+          tag="pr-${PR_NUMBER}-${HEAD_SHA::7}"
+          docker build --pull \
+            --label "org.opencontainers.image.revision=${HEAD_SHA}" \
+            --label "org.opencontainers.image.version=${tag}" \
+            -t "${image}:${tag}" .
+          docker push "${image}:${tag}"
+          digest="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${image}:${tag}" | grep "^${image}@")"
+          echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
+
+      # The label records which PR dev runs, so closing another PR
+      # doesn't reset this one.
+      - name: Deploy preview to dev
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          gcloud run jobs update "${JOB_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${IMAGE_REF}" \
+            --update-labels="preview_pr=${PR_NUMBER}" \
+            --quiet
+          {
+            echo "### PR #${PR_NUMBER} preview deployed to dev"
+            echo "- Commit: \`${HEAD_SHA}\`"
+            echo "- Image: \`${IMAGE_REF}\`"
+            echo ""
+            echo "Remove the **deploy-dev** label to put dev back on main."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  reset:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       ((github.event.action == 'unlabeled' && github.event.label.name == 'deploy-dev') ||
+        (github.event.action == 'closed' && contains(github.event.pull_request.labels.*.name, 'deploy-dev'))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: dev
+
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Put dev back on the latest main build
+        run: |
+          running_pr="$(gcloud run jobs describe "${JOB_NAME}" \
+            --project="${PROJECT_ID}" --region="${REGION}" \
+            --format='value(metadata.labels.preview_pr)')"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${running_pr}" != "${PR_NUMBER}" ]; then
+            echo "Dev isn't running PR #${PR_NUMBER} (running: ${running_pr:-main}); nothing to reset."
+            exit 0
+          fi
+          image="${REPO}/rotator"
+          digest="$(gcloud artifacts docker images describe "${image}:latest" --format='value(image_summary.digest)')"
+          gcloud run jobs update "${JOB_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${image}@${digest}" \
+            --remove-labels=preview_pr \
+            --quiet
+          echo "### Dev reset to the latest main build (\`${image}@${digest}\`)" >> "${GITHUB_STEP_SUMMARY}"

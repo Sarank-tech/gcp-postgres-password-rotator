@@ -1,0 +1,8 @@
+# Who must approve changes, enforced by branch protection on main
+# ("Require review from Code Owners"). One team owns everything, including
+# promotions (deploy/<env>.json) and the workflows and this file (.github/).
+#
+# TODO: replace TEAM-SLUG with the team's slug from its URL
+# (github.com/orgs/ingka-group-digital/teams/<slug>). The team needs Write
+# access to the repository.
+* @ingka-group-digital/TEAM-SLUG

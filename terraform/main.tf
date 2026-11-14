@@ -96,9 +96,15 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.ref"        = "assertion.ref"
   }
 
-  # Reject tokens from any other repository, and (trunk-based) from any branch
-  # other than main, so a workflow edited on a feature branch can't deploy.
-  attribute_condition = "assertion.repository == \"${var.github_repository}\" && assertion.ref == \"${var.github_allowed_ref}\""
+  # Reject tokens from any other repository, and from any branch other than
+  # main, so a workflow edited on a feature branch can't deploy. Dev also
+  # accepts pull request runs (PR previews); higher environments never do.
+  attribute_condition = join("", [
+    "assertion.repository == \"${var.github_repository}\" && ",
+    "(assertion.ref == \"${var.github_allowed_ref}\"",
+    var.github_allow_pull_requests ? " || assertion.ref.startsWith(\"refs/pull/\")" : "",
+    ")",
+  ])
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -226,11 +232,14 @@ resource "google_vpc_access_connector" "rotator" {
 ###############################################################################
 # 4b. Artifact Registry (dev only)
 #
-# Build once, run everywhere: CI pushes each image once, to dev's registry
-# (a tag per commit SHA plus "latest"), and later environments run that same
-# digest from here. The cleanup policy keeps the 3 newest versions plus
-# whatever each environment currently runs (tagged deployed-<env> by CI), and
-# deletes all others.
+# Build once, run everywhere: CI pushes each image once, to dev's registry,
+# and later environments run that same digest from here. Two images:
+#   rotator     builds of main (tags <sha>, build-<n>, latest); promotable
+#   pr-rotator  throwaway PR preview builds, deployed to dev only
+# The cleanup policy keeps the 10 newest rotator builds, the 5 newest
+# previews, and anything tagged deployed-<env> (running now), candidate-<env>
+# (open promotion PR) or prod-<date> (released to prod; kept forever). All
+# other versions are deleted.
 ###############################################################################
 
 resource "google_artifact_registry_repository" "rotator" {
@@ -247,17 +256,28 @@ resource "google_artifact_registry_repository" "rotator" {
     id     = "keep-recent"
     action = "KEEP"
     most_recent_versions {
-      keep_count = 3
+      package_name_prefixes = ["rotator"]
+      keep_count            = 10
     }
   }
 
-  # Never delete an image an environment is running.
+  cleanup_policies {
+    id     = "keep-recent-previews"
+    action = "KEEP"
+    most_recent_versions {
+      package_name_prefixes = ["pr-rotator"]
+      keep_count            = 5
+    }
+  }
+
+  # Never delete an image an environment runs, a pending promotion, or a
+  # prod release.
   cleanup_policies {
     id     = "keep-deployed"
     action = "KEEP"
     condition {
       tag_state    = "TAGGED"
-      tag_prefixes = ["deployed-"]
+      tag_prefixes = ["deployed-", "candidate-", "prod-"]
     }
   }
 

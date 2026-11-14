@@ -10,9 +10,9 @@ Three separate concerns, each owned by one part of the repo:
 
 | Concern | Owner | How it changes |
 | --- | --- | --- |
-| Rotation logic | `rotator.py` (+ `Dockerfile`) | Push to `main` → GitHub Actions builds and deploys |
+| Rotation logic | `rotator.py` (+ `Dockerfile`) | Merge to `main` → GitHub Actions builds once and deploys dev; promotion PRs deploy higher environments |
 | GCP infrastructure | `terraform/` | `terraform apply`, run by hand |
-| Delivery pipeline | `.github/workflows/deploy.yaml` | Push to `main` |
+| Delivery pipeline | `.github/workflows/`, `.github/scripts/promotion.sh`, `deploy/<env>.json` | PR to `main` (see [CICD.md](CICD.md)) |
 | Environments | `terraform/envs/<env>.tfvars` + `<env>.backend.hcl`, GitHub Environments | One GCP project and one state bucket per environment (dev, test, stage, prod) |
 
 ```mermaid
@@ -66,8 +66,13 @@ flowchart LR
 ├── requirements.txt            # Pinned Python dependencies (scramp pinned
 │                               #   explicitly for pg8000 compatibility)
 ├── Dockerfile                  # python:3.11-slim, non-root, ENTRYPOINT rotator.py
-├── .github/workflows/
-│   └── deploy.yaml             # Build once → dev → test (approval), on main
+├── .github/
+│   ├── CODEOWNERS              # Who approves PRs (incl. promotions)
+│   ├── scripts/promotion.sh    # Enabled environments and their order
+│   └── workflows/              # build, preview, promote, promotion-check,
+│                               #   deploy, confirm-prod (see CICD.md)
+├── deploy/
+│   └── <env>.json              # The build each environment above dev runs
 └── terraform/
     ├── main.tf                 # Backend, provider, and all resources, in
     │                           #   numbered sections (APIs, WIF, CI SA,
@@ -142,20 +147,24 @@ On each execution:
 
 ### Delivery flow
 
-`push to main` → **dev job** (GitHub Environment `dev`): authenticates through
-WIF as dev's `sa-cicd-deployer` → `docker build` → push `rotator:<sha>` and
-`rotator:latest` to dev's registry → `gcloud run jobs update
---image=rotator@sha256:<digest>`.
+Full detail in [CICD.md](CICD.md). In short:
 
-→ **test job** (GitHub Environment `test`, waits for a required reviewer):
-pulls that digest with dev's identity, checks its revision label equals the
-commit SHA, switches to test's WIF identity and points test's job at the same
-digest in dev's registry, then tags it `deployed-test` (as dev). Nothing is
-rebuilt or copied: dev's registry is the only one, test's Cloud Run service
-agent reads from it, and the `deployed-<env>` tag stops dev's cleanup policy
-from deleting an image test still runs. If the image is cleaned up before
-someone approves test, the test job fails at the pull; approve a newer run
-instead.
+- **PR preview** (optional): a PR labelled `deploy-dev` is built as
+  `pr-rotator:pr-<n>-<sha>` and deployed to dev on every push, before review.
+- **Merge to `main`**: `build.yaml` builds the image once as **build N**,
+  pushes `rotator:<sha>` to dev's registry, points dev's job at the digest,
+  then tags it `build-N`, `latest` and `deployed-dev`.
+- **Promotion**: the *Create promotion PR* button opens a PR changing only
+  `deploy/<env>.json` to that build. Once approved and merged, `deploy.yaml`
+  verifies the image (tags `build-N` and the commit SHA) with dev's
+  identity, points the environment's job at the same digest in dev's
+  registry with that environment's identity, and moves the `deployed-<env>`
+  tag. Nothing is rebuilt or copied.
+- **Release**: *Confirm prod stable* tags the image `prod-<date>-build-<n>`,
+  moves the `prod` branch and creates a GitHub Release.
+
+Dev's cleanup policy keeps the 10 newest builds, the 5 newest previews, and
+anything tagged `deployed-*`, `candidate-*` or `prod-*`.
 
 ## Identities and permissions
 
@@ -184,7 +193,7 @@ Notes:
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
 | Serverless VPC Access connector `pg-rotator-conn-<env>` | Gives the job a path into `ingka-dp-vpc-1` VPC (`vpc_connector_cidr`, `10.8.0.0/28` in dev; egress `PRIVATE_RANGES_ONLY`) | Terraform |
 | Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
-| Artifact Registry `rotator-repo` (dev only) | The single image store for all environments; keeps the 3 newest versions and every `deployed-<env>` image, deletes all others | Terraform |
+| Artifact Registry `rotator-repo` (dev only) | The single image store for all environments; keeps the 10 newest builds, the 5 newest PR previews, and every image tagged `deployed-*`, `candidate-*` or `prod-*`; deletes all others | Terraform |
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |
 | Cloud Scheduler | Calls `run.googleapis.com/v2/.../jobs/...:run` with an OAuth token | Terraform |
 | Workload Identity Pool `github-actions-pool-<env>` | Trusts `token.actions.githubusercontent.com` | Terraform |

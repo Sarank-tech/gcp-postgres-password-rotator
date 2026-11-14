@@ -1,0 +1,134 @@
+name: Confirm prod stable
+
+# Run after the prod sanity check passes. Records the build prod runs as a
+# release:
+#   - tags the image prod-<date>-build-<n> (never cleaned up: disaster
+#     restore can always go back to it),
+#   - moves the "prod" branch to its commit (the production copy of the code),
+#   - creates a GitHub Release with the changes since the previous one.
+#
+# Disaster restore is a promotion PR pointing deploy/prod.json back at an
+# earlier release's image, not a merge from the prod branch.
+on:
+  workflow_dispatch:
+    inputs:
+      allow_rewind:
+        description: Allow moving the prod branch back (after a prod rollback)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: confirm-prod
+  cancel-in-progress: false
+
+jobs:
+  confirm:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: prod
+
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      REPO: ${{ vars.REGISTRY_REPO }}
+      ALLOW_REWIND: ${{ inputs.allow_rewind }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Read the prod record
+        id: record
+        run: |
+          source .github/scripts/promotion.sh
+          is_enabled prod || { echo "::error::prod is not enabled yet (promotion.sh)"; exit 1; }
+          check_record deploy/prod.json "${REPO}"
+          {
+            echo "build=$(jq -r .build deploy/prod.json)"
+            echo "commit=$(jq -r .commit deploy/prod.json)"
+            echo "image=$(jq -r .image deploy/prod.json)"
+            echo "summary=$(jq -r .summary deploy/prod.json)"
+            echo "release=prod-$(date -u +%Y%m%d)-build-$(jq -r .build deploy/prod.json)"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Only confirm what prod really runs.
+      - name: Authenticate to prod
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Check prod runs this build
+        env:
+          IMAGE: ${{ steps.record.outputs.image }}
+        run: |
+          running="$(gcloud run jobs describe postgres-password-rotator-prod \
+            --project="${PROJECT_ID}" --region="${REGION}" \
+            --format='value(spec.template.spec.template.spec.containers[0].image)')"
+          if [ "${running}" != "${IMAGE}" ]; then
+            echo "::error::prod runs ${running}, not ${IMAGE}. Merge the prod promotion PR first."
+            exit 1
+          fi
+
+      - name: Authenticate to the registry
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.REGISTRY_WIF_PROVIDER }}
+          service_account: ${{ vars.REGISTRY_DEPLOY_SA }}
+
+      - name: Tag the release image
+        env:
+          IMAGE: ${{ steps.record.outputs.image }}
+          RELEASE: ${{ steps.record.outputs.release }}
+        run: gcloud artifacts docker tags add "${IMAGE}" "${REPO}/rotator:${RELEASE}" --quiet
+
+      - name: Move the prod branch
+        env:
+          COMMIT: ${{ steps.record.outputs.commit }}
+        run: |
+          force=""
+          if git rev-parse --verify --quiet origin/prod > /dev/null \
+             && ! git merge-base --is-ancestor origin/prod "${COMMIT}"; then
+            if [ "${ALLOW_REWIND}" != "true" ]; then
+              echo "::error::prod branch is ahead of ${COMMIT::7} (prod was rolled back). Re-run with 'Allow moving the prod branch back'."
+              exit 1
+            fi
+            force="--force"
+          fi
+          git push ${force} origin "${COMMIT}:refs/heads/prod"
+
+      - name: Create the GitHub Release
+        env:
+          BUILD: ${{ steps.record.outputs.build }}
+          COMMIT: ${{ steps.record.outputs.commit }}
+          SUMMARY: ${{ steps.record.outputs.summary }}
+          RELEASE: ${{ steps.record.outputs.release }}
+          IMAGE: ${{ steps.record.outputs.image }}
+        run: |
+          previous="$(git tag --list 'prod-*' --sort=-creatordate | head -1)" || true
+          {
+            echo "Build **${BUILD}**, image \`${IMAGE}\`."
+            echo ""
+            if [ -n "${previous}" ] && git merge-base --is-ancestor "${previous}" "${COMMIT}"; then
+              echo "### Changes since ${previous}"
+              git log --first-parent --format='- %s (%h)' "${previous}..${COMMIT}" -- . ':(exclude)deploy'
+            else
+              echo "### Changes"
+              git log --first-parent --format='- %s (%h)' -20 "${COMMIT}" -- . ':(exclude)deploy'
+            fi
+          } > "${RUNNER_TEMP}/notes.md"
+          gh release create "${RELEASE}" --target "${COMMIT}" \
+            --title "Prod $(date -u +%Y-%m-%d) — build ${BUILD}: ${SUMMARY}" \
+            --notes-file "${RUNNER_TEMP}/notes.md"
+          echo "### Released ${RELEASE}" >> "${GITHUB_STEP_SUMMARY}"

@@ -66,6 +66,12 @@ variable "github_allowed_ref" {
   default     = "refs/heads/main"
 }
 
+variable "github_allow_pull_requests" {
+  description = "Also accept tokens from pull request runs (refs/pull/*), for PR preview deploys. Dev only: higher environments must accept main only."
+  type        = bool
+  default     = false
+}
+
 variable "wif_pool_id" {
   description = "Workload Identity Pool ID. Default: github-actions-pool-<environment>."
   type        = string

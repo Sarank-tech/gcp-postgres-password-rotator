@@ -1,0 +1,109 @@
+name: Promotion check
+
+# Runs on every PR to main (so it can be a required check). PRs that don't
+# touch deploy/ pass straight away. A promotion PR must change exactly one
+# deploy/<env>.json and nothing else, point at a build of main from dev's
+# registry, and follow the order dev -> test -> stage -> prod.
+#
+# Promotion PRs opened by promote.yaml start this check with
+# workflow_dispatch (GITHUB_TOKEN can't trigger pull_request workflows).
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  promotion-check:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      REPO: ${{ vars.REGISTRY_REPO }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the promotion
+        run: |
+          source .github/scripts/promotion.sh
+          changed="$(git diff --name-only origin/main...HEAD)"
+          promotions="$(grep '^deploy/' <<< "${changed}" || true)"
+          if [ -z "${promotions}" ]; then
+            echo "Not a promotion PR; nothing to check."
+            exit 0
+          fi
+
+          [ -n "${REPO}" ] || { echo "::error::Repository variable REGISTRY_REPO is not set"; exit 1; }
+          if [ "$(wc -l <<< "${promotions}")" -ne 1 ] || [ "$(wc -l <<< "${changed}")" -ne 1 ]; then
+            echo "::error::A promotion PR must change exactly one deploy/<env>.json and nothing else. Changed:"
+            echo "${changed}"
+            exit 1
+          fi
+
+          file="${promotions}"
+          [[ "${file}" =~ ^deploy/([a-z]+)\.json$ ]] || { echo "::error::Unexpected file ${file}"; exit 1; }
+          target="${BASH_REMATCH[1]}"
+          is_enabled "${target}" || { echo "::error::${target} is not enabled (promotion.sh)"; exit 1; }
+          check_record "${file}" "${REPO}"
+
+          build="$(jq -r .build "${file}")"
+          commit="$(jq -r .commit "${file}")"
+          git merge-base --is-ancestor "${commit}" origin/main \
+            || { echo "::error::Commit ${commit} isn't on main"; exit 1; }
+
+          # Stage and prod only take what the previous environment runs, or
+          # roll back to an image they ran before. (Test takes any build
+          # that reached dev; that is checked when the PR is created and
+          # again before deploying.)
+          from="$(previous_env "${target}")"
+          image="$(jq -r .image "${file}")"
+          if [ "${from}" != "dev" ]; then
+            source_image="$(git show "origin/main:deploy/${from}.json" 2>/dev/null | jq -r .image)" || true
+            if [ "${source_image}" != "${image}" ] && ! ran_before "${target}" "${image}" origin/main; then
+              echo "::error::${target} can only get the build ${from} runs, or roll back to a build it ran before"
+              exit 1
+            fi
+          fi
+
+          echo "OK: build ${build} (${commit::7}) to ${target}"
+
+  # Closed without merging: the build no longer needs protecting.
+  release-candidate:
+    if: >-
+      github.event.action == 'closed' &&
+      !github.event.pull_request.merged &&
+      startsWith(github.event.pull_request.head.ref, 'promote/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      REPO: ${{ vars.REGISTRY_REPO }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+
+    steps:
+      - name: Authenticate to the registry
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.REGISTRY_WIF_PROVIDER }}
+          service_account: ${{ vars.REGISTRY_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      # promote/<env>-build-<n> -> candidate-<env>-build-<n>
+      - name: Remove the candidate tag
+        run: |
+          tag="candidate-${HEAD_REF#promote/}"
+          gcloud artifacts docker tags delete "${REPO}/rotator:${tag}" --quiet \
+            || echo "Tag ${tag} not found; nothing to remove."

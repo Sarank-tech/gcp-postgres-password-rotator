@@ -1,0 +1,122 @@
+name: Build and deploy to dev
+
+# Build once: every merge to main builds the image once, into dev's registry
+# (the only one), and deploys it to dev. Higher environments get that exact
+# image later through promotion PRs (promote.yaml), never a rebuild.
+#
+# Merges that only change deploy/ (promotions) or docs don't build.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "deploy/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+# Least privilege: read the repo, and mint an OIDC token for WIF.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: dev
+
+    # Shared with PR previews: never two deploys to dev at once.
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+
+    env:
+      PROJECT_ID: ${{ vars.PROJECT_ID }}
+      REGION: ${{ vars.REGION }}
+      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+      DEPLOY_SA: ${{ vars.DEPLOY_SA }}
+      REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
+      IMAGE: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo/rotator
+      JOB_NAME: postgres-password-rotator-dev
+      BUILD: ${{ github.run_number }}
+
+    steps:
+      - name: Check environment variables
+        run: |
+          for name in PROJECT_ID REGION WIF_PROVIDER DEPLOY_SA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable ${name} is not set on the dev environment"
+              exit 1
+            fi
+          done
+
+      # Third-party actions are pinned to full commit SHAs (tags are mutable).
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Keyless auth via Workload Identity Federation.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGISTRY}" --quiet
+
+      - name: Build image
+        run: |
+          docker build \
+            --pull \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=build-${BUILD}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            .
+
+      - name: Push image
+        id: push
+        run: |
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          digest="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" | grep "^${IMAGE}@")"
+          echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "Pushed ${digest}"
+
+      # Point the job at the exact digest, so what runs is immutable. Clear
+      # the preview label: dev now runs main again.
+      - name: Update Cloud Run Job
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          gcloud run jobs update "${JOB_NAME}" \
+            --project="${PROJECT_ID}" \
+            --region="${REGION}" \
+            --image="${IMAGE_REF}" \
+            --remove-labels=preview_pr \
+            --quiet
+
+      # Tagged only after dev runs it: a build-<n> tag means "passed dev",
+      # which is what makes it promotable to test.
+      - name: Tag build
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          for tag in "build-${BUILD}" latest deployed-dev; do
+            gcloud artifacts docker tags add "${IMAGE_REF}" "${IMAGE}:${tag}" --quiet
+          done
+
+      - name: Summary
+        env:
+          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+        run: |
+          {
+            echo "### Build ${BUILD} deployed to dev"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Image: \`${IMAGE_REF}\`"
+            echo ""
+            echo "Promote it with Actions → **Create promotion PR**."
+          } >> "${GITHUB_STEP_SUMMARY}"

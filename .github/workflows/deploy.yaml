@@ -1,206 +1,172 @@
-name: Build and deploy rotator
+name: Deploy promoted build
 
-# Trunk-based: main is the only long-lived branch. Every push to main builds
-# the image once, into dev's registry (the only one), and deploys it to dev;
-# test then runs that exact image from dev's registry (same digest, never
-# rebuilt or copied) once a reviewer approves the "test" GitHub Environment.
-#
-# Per-environment values live in GitHub Environment variables (Settings ->
-# Environments -> <env>): PROJECT_ID, REGION, WIF_PROVIDER, DEPLOY_SA.
+# Runs when a promotion PR (one that changes deploy/<env>.json) is merged.
+# Deploys exactly the image the file names, from dev's registry; nothing is
+# rebuilt or copied.
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+    paths:
+      - "deploy/*.json"
 
-# Least privilege: read the repo, and mint an OIDC token for WIF.
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  # Build once, push to dev's Artifact Registry, deploy to dev.
-  dev:
+  detect:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: dev
-
-    # Never run two deploys to the same environment at once.
-    concurrency:
-      group: deploy-dev
-      cancel-in-progress: false
-
-    env:
-      PROJECT_ID: ${{ vars.PROJECT_ID }}
-      REGION: ${{ vars.REGION }}
-      WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
-      DEPLOY_SA: ${{ vars.DEPLOY_SA }}
-      REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
-      IMAGE: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo/rotator
-      JOB_NAME: postgres-password-rotator-dev
-
-    # Handed to the promotion jobs: what to promote and how to read it.
+    timeout-minutes: 5
     outputs:
-      image_ref: ${{ steps.push.outputs.image_ref }}
-      wif_provider: ${{ vars.WIF_PROVIDER }}
-      deploy_sa: ${{ vars.DEPLOY_SA }}
-
+      envs: ${{ steps.envs.outputs.envs }}
     steps:
-      - name: Check environment variables
-        run: |
-          for name in PROJECT_ID REGION WIF_PROVIDER DEPLOY_SA; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Variable ${name} is not set on the dev environment"
-              exit 1
-            fi
-          done
-
-      # Third-party actions are pinned to full commit SHAs (tags are mutable).
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      # Keyless auth via Workload Identity Federation.
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
-        with:
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOY_SA }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker "${REGISTRY}" --quiet
-
-      # Tag with the commit SHA (traceable) and latest.
-      - name: Build image
-        run: |
-          docker build \
-            --pull \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            -t "${IMAGE}:${GITHUB_SHA}" \
-            -t "${IMAGE}:latest" \
-            .
-
-      - name: Push image
-        id: push
-        run: |
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          docker push "${IMAGE}:latest"
-          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")"
-          echo "image_ref=${digest}" >> "${GITHUB_OUTPUT}"
-          echo "Pushed ${digest}"
-
-      # Point the job at the exact digest just pushed, so what runs is
-      # immutable even if "latest" moves later.
-      - name: Update Cloud Run Job
+      - name: Which environments changed
+        id: envs
         env:
-          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          gcloud run jobs update "${JOB_NAME}" \
-            --project="${PROJECT_ID}" \
-            --region="${REGION}" \
-            --image="${IMAGE_REF}" \
-            --quiet
+          envs="$(git diff --name-only "${BEFORE}" "${GITHUB_SHA}" -- 'deploy/*.json' \
+            | sed -n 's|^deploy/\([a-z]*\)\.json$|\1|p' | jq -Rnc '[inputs | select(length > 0)]')"
+          echo "envs=${envs}" >> "${GITHUB_OUTPUT}"
+          echo "Changed: ${envs}"
 
-      - name: Summary
-        env:
-          IMAGE_REF: ${{ steps.push.outputs.image_ref }}
-        run: |
-          {
-            echo "### Deployed ${JOB_NAME}"
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Image: \`${IMAGE_REF}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-  # Promote dev's image to test. Waits for a reviewer on the "test"
-  # environment; a newer run's pending test deploy replaces an older one.
-  test:
-    needs: dev
+  deploy:
+    needs: detect
+    if: needs.detect.outputs.envs != '[]'
+    strategy:
+      matrix:
+        env: ${{ fromJSON(needs.detect.outputs.envs) }}
+      fail-fast: false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: test
+    timeout-minutes: 15
+    environment: ${{ matrix.env }}
 
     concurrency:
-      group: deploy-test
+      group: deploy-${{ matrix.env }}
       cancel-in-progress: false
 
     env:
-      SOURCE_IMAGE: ${{ needs.dev.outputs.image_ref }}
+      TARGET: ${{ matrix.env }}
       PROJECT_ID: ${{ vars.PROJECT_ID }}
       REGION: ${{ vars.REGION }}
       WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
       DEPLOY_SA: ${{ vars.DEPLOY_SA }}
-      JOB_NAME: postgres-password-rotator-test
-      DEPLOYED_TAG: deployed-test
+      REPO: ${{ vars.REGISTRY_REPO }}
 
     steps:
-      - name: Check environment variables
+      - name: Check variables
         run: |
-          for name in SOURCE_IMAGE PROJECT_ID REGION WIF_PROVIDER DEPLOY_SA; do
+          for name in PROJECT_ID REGION WIF_PROVIDER DEPLOY_SA REPO; do
             if [ -z "${!name}" ]; then
-              echo "::error::Variable ${name} is not set on the test environment"
+              echo "::error::Variable ${name} is not set (environment ${TARGET}, or repository REGISTRY_REPO)"
               exit 1
             fi
           done
 
-      # Check the image in dev's registry is the one built from this commit.
-      - name: Authenticate to dev
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the promotion record
+        id: record
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          source .github/scripts/promotion.sh
+          is_enabled "${TARGET}" || { echo "::error::${TARGET} is not enabled (promotion.sh)"; exit 1; }
+          file="deploy/${TARGET}.json"
+          check_record "${file}" "${REPO}"
+          from="$(previous_env "${TARGET}")"
+          image="$(jq -r .image "${file}")"
+          if [ "${from}" != "dev" ] \
+             && [ "$(jq -r .image "deploy/${from}.json" 2>/dev/null)" != "${image}" ] \
+             && ! ran_before "${TARGET}" "${image}" "${BEFORE}"; then
+            echo "::error::${TARGET} can only get the build ${from} runs, or roll back to a build it ran before"
+            exit 1
+          fi
+          {
+            echo "build=$(jq -r .build "${file}")"
+            echo "commit=$(jq -r .commit "${file}")"
+            echo "image=$(jq -r .image "${file}")"
+            echo "job=$(job_name "${TARGET}")"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Dev's identity: check the image is the build the record claims.
+      - name: Authenticate to the registry
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
-          workload_identity_provider: ${{ needs.dev.outputs.wif_provider }}
-          service_account: ${{ needs.dev.outputs.deploy_sa }}
+          workload_identity_provider: ${{ vars.REGISTRY_WIF_PROVIDER }}
+          service_account: ${{ vars.REGISTRY_DEPLOY_SA }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
       - name: Verify image
+        env:
+          BUILD: ${{ steps.record.outputs.build }}
+          COMMIT: ${{ steps.record.outputs.commit }}
+          IMAGE: ${{ steps.record.outputs.image }}
         run: |
-          gcloud auth configure-docker "${SOURCE_IMAGE%%/*}" --quiet
-          docker pull "${SOURCE_IMAGE}"
-          revision="$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "${SOURCE_IMAGE}")"
-          if [ "${revision}" != "${GITHUB_SHA}" ]; then
-            echo "::error::Image revision ${revision} does not match commit ${GITHUB_SHA}"
-            exit 1
-          fi
+          source .github/scripts/promotion.sh
+          tags="$(image_tags "${REPO}/rotator" "${IMAGE#*@}")"
+          grep -qx "build-${BUILD}" <<< "${tags}" \
+            || { echo "::error::${IMAGE} is not build ${BUILD} (missing, or cleaned up)"; exit 1; }
+          grep -qx "${COMMIT}" <<< "${tags}" \
+            || { echo "::error::${IMAGE} was not built from ${COMMIT}"; exit 1; }
 
-      # Test's Cloud Run pulls from dev's registry through its service agent
-      # (granted in dev's Terraform), so nothing is copied.
-      - name: Authenticate to test
+      - name: Authenticate to ${{ matrix.env }}
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SA }}
 
       - name: Update Cloud Run Job
+        env:
+          IMAGE: ${{ steps.record.outputs.image }}
+          JOB_NAME: ${{ steps.record.outputs.job }}
         run: |
           gcloud run jobs update "${JOB_NAME}" \
             --project="${PROJECT_ID}" \
             --region="${REGION}" \
-            --image="${SOURCE_IMAGE}" \
+            --image="${IMAGE}" \
             --quiet
 
-      # Tag what test now runs, so dev's cleanup policy never deletes it.
-      # Done after the deploy: a failed deploy leaves the tag on the image
-      # test is still running.
-      - name: Authenticate to dev (tag)
+      # Done after the deploy, as dev again: deployed-<env> moves to the image
+      # the env now runs (kept by cleanup); the candidate tag is no longer
+      # needed.
+      - name: Authenticate to the registry (tags)
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
-          workload_identity_provider: ${{ needs.dev.outputs.wif_provider }}
-          service_account: ${{ needs.dev.outputs.deploy_sa }}
+          workload_identity_provider: ${{ vars.REGISTRY_WIF_PROVIDER }}
+          service_account: ${{ vars.REGISTRY_DEPLOY_SA }}
 
-      - name: Tag image as deployed to test
+      - name: Update tags
+        env:
+          BUILD: ${{ steps.record.outputs.build }}
+          IMAGE: ${{ steps.record.outputs.image }}
         run: |
-          gcloud artifacts docker tags add \
-            "${SOURCE_IMAGE}" "${SOURCE_IMAGE%@*}:${DEPLOYED_TAG}" \
-            --quiet
+          gcloud artifacts docker tags add "${IMAGE}" "${REPO}/rotator:deployed-${TARGET}" --quiet
+          gcloud artifacts docker tags delete "${REPO}/rotator:candidate-${TARGET}-build-${BUILD}" --quiet \
+            || echo "No candidate tag to remove."
 
       - name: Summary
+        env:
+          BUILD: ${{ steps.record.outputs.build }}
+          COMMIT: ${{ steps.record.outputs.commit }}
+          IMAGE: ${{ steps.record.outputs.image }}
+          JOB_NAME: ${{ steps.record.outputs.job }}
         run: |
           {
-            echo "### Deployed ${JOB_NAME}"
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Image: \`${SOURCE_IMAGE}\` (tagged \`${DEPLOYED_TAG}\`)"
+            echo "### Build ${BUILD} deployed to ${TARGET}"
+            echo "- Job: \`${JOB_NAME}\`"
+            echo "- Commit: \`${COMMIT}\`"
+            echo "- Image: \`${IMAGE}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

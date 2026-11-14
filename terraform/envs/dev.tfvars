@@ -5,6 +5,9 @@ sql_instance_name = "staging-database"
 
 github_repository = "ingka-group-digital/mdm-postgrespwd-rotator"
 
+# PR preview deploys go to dev only.
+github_allow_pull_requests = true
+
 user_secret_mappings = {
   "postgres"    = "postgres_pwd"
   "int_mdm_012" = "int_mdm_012_pwd"

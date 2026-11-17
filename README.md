@@ -13,6 +13,8 @@ password as a new version of that user's secret. Applications that read the
 | GCP project | `ingka-dp-sap-dev` (`europe-west1`) |
 | Cloud SQL instance | `staging-database` (PostgreSQL 16) |
 | Rotated users → secrets | `postgres` → `postgres_pwd`, `int_mdm_012` → `int_mdm_012_pwd`, `int_mdm_013` → `int_mdm_013_pwd`, `int_mdm_016` → `int_mdm_016_pwd` |
+| Previous passwords (for ops) | `postgres_oldpwd`, `int_mdm_012_oldpwd`, `int_mdm_013_oldpwd`, `int_mdm_016_oldpwd` |
+| Versions kept per secret | 2: the current one (enabled) and the one before it (disabled); older versions are destroyed |
 | Cloud Run Job | `postgres-password-rotator-dev` |
 | Schedule | `0 0 1 */3 *` UTC (1 Jan, 1 Apr, 1 Jul, 1 Oct) |
 | Image | `europe-west1-docker.pkg.dev/ingka-dp-sap-dev/rotator-repo/rotator` |
@@ -82,8 +84,8 @@ python rotator.py
 ```
 
 Your own gcloud account needs `roles/cloudsql.client` on the instance and
-`secretmanager.versions.access`/`add`/`list`/`disable` on the secrets
-involved. The full list
+`secretmanager.versions.access`/`add`/`list`/`disable`/`destroy` on the
+secrets involved. The full list
 of environment variables is in the `rotator.py` module docstring.
 
 ## Tests and checks
@@ -178,6 +180,10 @@ Also required, and not created by Terraform:
   on that network).
 - Secrets `postgres_pwd`, `int_mdm_012_pwd`, `int_mdm_013_pwd`,
   `int_mdm_016_pwd`, each holding that user's **current** password.
+- Secrets `postgres_oldpwd`, `int_mdm_012_oldpwd`, `int_mdm_013_oldpwd`,
+  `int_mdm_016_oldpwd` (region `europe-west1`), for the password each
+  rotation replaces. A dummy first value is fine; the first rotation writes
+  the real one.
 - On PostgreSQL 16, for each `int_mdm_*` user:
   `GRANT <user> TO postgres WITH ADMIN OPTION;`
 - An unused `/28` in the VPC for the Serverless VPC Access connector
@@ -251,9 +257,11 @@ logged.
 
 ## Adding a user to rotation
 
-1. Create the secret in Secret Manager with the user's current password.
-2. Add the `user = "secret_id"` pair to `user_secret_mappings` in
-   `terraform/envs/<env>.tfvars`, for each environment that has the user.
+1. Create the secret in Secret Manager with the user's current password, and
+   its `<user>_oldpwd` secret (a dummy value is fine).
+2. Add the `user = "secret_id"` pairs to `user_secret_mappings` and
+   `user_old_secret_mappings` in `terraform/envs/<env>.tfvars`, for each
+   environment that has the user.
 3. Make sure `postgres` can change that user's password (PostgreSQL 16:
    `GRANT <user> TO postgres WITH ADMIN OPTION;`).
 4. Run Terraform for each of those environments (see Deploying).

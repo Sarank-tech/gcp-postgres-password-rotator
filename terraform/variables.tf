@@ -46,6 +46,12 @@ variable "user_secret_mappings" {
   }
 }
 
+variable "user_old_secret_mappings" {
+  description = "Map of PostgreSQL user name => existing Secret Manager secret ID that receives the password each rotation replaces (for ops). Users must also be in user_secret_mappings."
+  type        = map(string)
+  default     = {}
+}
+
 ###############################################################################
 # GitHub / Workload Identity Federation
 ###############################################################################

@@ -12,6 +12,15 @@ user_secret_mappings = {
   "int_mdm_016" = "int_mdm_016_pwd"
 }
 
+# The password each rotation replaces is kept here for ops (current and
+# previous version only).
+user_old_secret_mappings = {
+  "postgres"    = "postgres_oldpwd"
+  "int_mdm_012" = "int_mdm_012_oldpwd"
+  "int_mdm_013" = "int_mdm_013_oldpwd"
+  "int_mdm_016" = "int_mdm_016_oldpwd"
+}
+
 vpc_network        = "ingka-dp-vpc-1"
 vpc_connector_cidr = "10.8.0.0/28"
 

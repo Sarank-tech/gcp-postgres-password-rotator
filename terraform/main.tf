@@ -156,9 +156,10 @@ resource "google_service_account_iam_member" "cicd_wif_binding" {
 ###############################################################################
 # 3. Runtime service account & secret access
 #
-# The Cloud Run Job runs as sa-db-rotator-<env> and can only read, add and
-# disable versions of the mapped password secrets (not every secret in the
-# project).
+# The Cloud Run Job runs as sa-db-rotator-<env> and can only read, add,
+# disable and destroy versions of the mapped password secrets, and add,
+# disable and destroy (not read) versions of the old-password secrets (not
+# every secret in the project).
 ###############################################################################
 
 resource "google_service_account" "db_rotator" {
@@ -172,8 +173,13 @@ data "google_secret_manager_secret" "mapped" {
   secret_id = each.value
 }
 
-# Read the current password, add new versions and disable the older ones,
-# on mapped secrets only.
+data "google_secret_manager_secret" "old" {
+  for_each  = var.user_old_secret_mappings
+  secret_id = each.value
+}
+
+# Read the current password, add new versions and prune the older ones, on
+# mapped secrets only.
 resource "google_secret_manager_secret_iam_member" "db_rotator_accessor" {
   for_each = data.google_secret_manager_secret.mapped
 
@@ -185,6 +191,16 @@ resource "google_secret_manager_secret_iam_member" "db_rotator_accessor" {
 
 resource "google_secret_manager_secret_iam_member" "db_rotator_version_manager" {
   for_each = data.google_secret_manager_secret.mapped
+
+  project   = var.project_id
+  secret_id = each.value.secret_id
+  role      = "roles/secretmanager.secretVersionManager"
+  member    = "serviceAccount:${google_service_account.db_rotator.email}"
+}
+
+# Write the replaced password and prune older versions; no read access.
+resource "google_secret_manager_secret_iam_member" "db_rotator_old_version_manager" {
+  for_each = data.google_secret_manager_secret.old
 
   project   = var.project_id
   secret_id = each.value.secret_id
@@ -378,6 +394,10 @@ resource "google_cloud_run_v2_job" "rotator" {
           name  = "SECRET_MAPPINGS"
           value = jsonencode(var.user_secret_mappings)
         }
+        env {
+          name  = "OLD_SECRET_MAPPINGS"
+          value = jsonencode(var.user_old_secret_mappings)
+        }
 
         resources {
           limits = {
@@ -397,6 +417,11 @@ resource "google_cloud_run_v2_job" "rotator" {
       error_message = "Cloud SQL instance ${var.sql_instance_name} has no private IP. Enable private IP on network ${var.vpc_network} first."
     }
 
+    precondition {
+      condition     = length(setsubtract(keys(var.user_old_secret_mappings), keys(var.user_secret_mappings))) == 0
+      error_message = "Every user in user_old_secret_mappings must also be in user_secret_mappings."
+    }
+
     # CI/CD owns the image after the first apply; don't roll it back.
     ignore_changes = [
       template[0].template[0].containers[0].image,
@@ -409,6 +434,7 @@ resource "google_cloud_run_v2_job" "rotator" {
     google_project_service.apis,
     google_secret_manager_secret_iam_member.db_rotator_accessor,
     google_secret_manager_secret_iam_member.db_rotator_version_manager,
+    google_secret_manager_secret_iam_member.db_rotator_old_version_manager,
   ]
 }
 

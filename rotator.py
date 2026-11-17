@@ -4,18 +4,24 @@ Runs as a Cloud Run Job. For each ``user -> secret`` pair in SECRET_MAPPINGS:
 
 1. Read the user's current password from Secret Manager (kept in memory only,
    used to roll back the secret if the database change cannot be committed).
-2. Generate a new random password.
-3. Inside a transaction, ``ALTER USER ... WITH PASSWORD`` using a pre-computed
+2. If OLD_SECRET_MAPPINGS names an old-password secret for the user, add the
+   current password to it, so ops can still look up the password in use
+   before this rotation. If that fails, the user is skipped before the
+   database is touched.
+3. Generate a new random password.
+4. Inside a transaction, ``ALTER USER ... WITH PASSWORD`` using a pre-computed
    SCRAM-SHA-256 verifier, so the plaintext never reaches the server (and so
    never appears in PostgreSQL statement logs).
-4. Add the new password as a new Secret Manager version.
-5. Commit. If the commit fails, re-add the old password as the latest secret
+5. Add the new password as a new Secret Manager version.
+6. Commit. If the commit fails, re-add the old password as the latest secret
    version so the secret keeps matching the database.
-6. Disable every older enabled version of the secret, so only the current
-   password can be read. Failing this step is logged as a warning: the
-   database and the secret already match, so the rotation still counts.
+7. Prune the secret: keep the new version, disable the one just before it
+   and destroy every older one, so a secret never holds more than the
+   current and the previous password. Failing this step is logged as a
+   warning: the database and the secret already match, so the rotation still
+   counts. The old-password secret is pruned the same way right after step 2.
 
-Steps 3-5 mean the database and secret can only disagree if both the commit
+Steps 4-6 mean the database and secret can only disagree if both the commit
 and the rollback write fail; that case is logged at CRITICAL.
 
 The job connects as an admin user (default ``postgres``) whose current
@@ -30,6 +36,9 @@ Environment variables:
     INSTANCE_CONNECTION_NAME  Cloud SQL connection name,
                               "project:region:instance" (required).
     SECRET_MAPPINGS           JSON object of {db_user: secret_id} (required).
+    OLD_SECRET_MAPPINGS       JSON object of {db_user: secret_id} receiving the
+                              password each rotation replaces (optional; users
+                              must also be in SECRET_MAPPINGS).
     DB_IP_TYPE                "private" (default) or "public".
     DB_NAME                   Database to connect to. Default "postgres".
     DB_ADMIN_USER             User to connect as. Default "postgres"; must be a
@@ -114,6 +123,7 @@ class Config:
     project_id: str
     instance_connection_name: str
     mappings: dict
+    old_mappings: dict
     ip_type: IPTypes
     db_name: str
     admin_user: str
@@ -128,19 +138,39 @@ def _require_env(name):
     return value
 
 
-def load_config():
-    """Build a Config from environment variables, validating as we go."""
+def _load_mappings(name, raw):
     try:
-        mappings = json.loads(_require_env("SECRET_MAPPINGS"))
+        mappings = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ConfigError(f"SECRET_MAPPINGS is not valid JSON: {exc}") from exc
-    if not isinstance(mappings, dict) or not mappings:
-        raise ConfigError("SECRET_MAPPINGS must be a non-empty JSON object")
+        raise ConfigError(f"{name} is not valid JSON: {exc}") from exc
+    if not isinstance(mappings, dict):
+        raise ConfigError(f"{name} must be a JSON object")
     for user, secret_id in mappings.items():
         if not isinstance(secret_id, str) or not user or not secret_id:
-            raise ConfigError(
-                "SECRET_MAPPINGS entries must be non-empty strings"
-            )
+            raise ConfigError(f"{name} entries must be non-empty strings")
+    return mappings
+
+
+def load_config():
+    """Build a Config from environment variables, validating as we go."""
+    mappings = _load_mappings("SECRET_MAPPINGS",
+                              _require_env("SECRET_MAPPINGS"))
+    if not mappings:
+        raise ConfigError("SECRET_MAPPINGS must be a non-empty JSON object")
+
+    old_mappings = _load_mappings(
+        "OLD_SECRET_MAPPINGS",
+        os.environ.get("OLD_SECRET_MAPPINGS", "").strip() or "{}")
+    unknown = sorted(set(old_mappings) - set(mappings))
+    if unknown:
+        raise ConfigError(
+            f"OLD_SECRET_MAPPINGS users not in SECRET_MAPPINGS: {unknown}"
+        )
+    shared = sorted(set(old_mappings.values()) & set(mappings.values()))
+    if shared:
+        raise ConfigError(
+            f"Secrets used as both current and old password: {shared}"
+        )
 
     admin_user = os.environ.get("DB_ADMIN_USER", "postgres")
     admin_secret = (
@@ -168,6 +198,7 @@ def load_config():
         project_id=_require_env("PROJECT_ID"),
         instance_connection_name=_require_env("INSTANCE_CONNECTION_NAME"),
         mappings=mappings,
+        old_mappings=old_mappings,
         ip_type=ip_types[ip_type_name],
         db_name=os.environ.get("DB_NAME", "postgres"),
         admin_user=admin_user,
@@ -262,26 +293,55 @@ class SecretStore:
         )
         return response.name
 
-    def disable_other_versions(self, secret_id, keep_version):
-        """Disable every enabled version except ``keep_version``.
+    def prune_versions(self, secret_id, keep_version):
+        """Keep ``keep_version`` and, disabled, the version just before it.
 
-        Returns the names of the versions disabled.
+        Every older version is destroyed: its value is erased for good, but
+        Secret Manager still lists it as DESTROYED. Versions newer than
+        ``keep_version`` are left alone. Returns the names of the versions
+        disabled and destroyed.
         """
-        keep_id = keep_version.rsplit("/", 1)[-1]
-        disabled = []
-        for version in self._client.list_secret_versions(
-            request={
-                "parent": self._secret_path(secret_id),
-                "filter": "state:ENABLED",
-            }
-        ):
-            if version.name.rsplit("/", 1)[-1] == keep_id:
-                continue
+        keep = _version_number(keep_version)
+        older = sorted(
+            (
+                version
+                for version in self._client.list_secret_versions(
+                    request={"parent": self._secret_path(secret_id)}
+                )
+                if _version_number(version.name) < keep
+                and not _is_destroyed(version)
+            ),
+            key=lambda version: _version_number(version.name),
+            reverse=True,
+        )
+        disabled, destroyed = [], []
+        if older and older[0].state == ENABLED:
             self._client.disable_secret_version(
+                request={"name": older[0].name}
+            )
+            disabled.append(older[0].name)
+        for version in older[1:]:
+            self._client.destroy_secret_version(
                 request={"name": version.name}
             )
-            disabled.append(version.name)
-        return disabled
+            destroyed.append(version.name)
+        return disabled, destroyed
+
+
+ENABLED = secretmanager.SecretVersion.State.ENABLED
+
+
+def _version_number(name):
+    return int(name.rsplit("/", 1)[-1])
+
+
+def _is_destroyed(version):
+    # With delayed destruction on, a destroyed version first waits as
+    # DISABLED with scheduled_destroy_time set; it is already on its way out.
+    return (
+        version.state == secretmanager.SecretVersion.State.DESTROYED
+        or bool(version.scheduled_destroy_time)
+    )
 
 
 ###############################################################################
@@ -317,6 +377,15 @@ def rotate_user(conn, store, config, username, secret_id):
         old_password = store.read_latest(secret_id)
         log(logging.INFO, "Read current secret version", step="read_secret",
             **ctx)
+
+        old_secret_id = config.old_mappings.get(username)
+        if old_secret_id:
+            old_version = store.add_version(old_secret_id, old_password)
+            log(logging.INFO, "Saved current password as the old password",
+                step="save_old_password", old_secret_id=old_secret_id,
+                secret_version=old_version, **ctx)
+            _prune_versions(store, old_secret_id, old_version,
+                            {**ctx, "secret_id": old_secret_id})
 
         new_password = generate_password(config.password_length)
         verifier = scram_sha256_verifier(new_password)
@@ -354,20 +423,21 @@ def rotate_user(conn, store, config, username, secret_id):
         return False
 
     log(logging.INFO, "Rotation succeeded", step="done", **ctx)
-    _disable_old_versions(store, secret_id, version, ctx)
+    _prune_versions(store, secret_id, version, ctx)
     return True
 
 
-def _disable_old_versions(store, secret_id, keep_version, ctx):
+def _prune_versions(store, secret_id, keep_version, ctx):
     try:
-        disabled = store.disable_other_versions(secret_id, keep_version)
-        log(logging.INFO, "Disabled previous secret versions",
-            step="disable_versions", disabled_versions=disabled, **ctx)
+        disabled, destroyed = store.prune_versions(secret_id, keep_version)
+        log(logging.INFO, "Pruned older secret versions",
+            step="prune_versions", disabled_versions=disabled,
+            destroyed_versions=destroyed, **ctx)
     except Exception as exc:
         log(logging.WARNING,
-            "Could not disable previous secret versions; disable them "
-            "manually",
-            step="disable_versions", error=type(exc).__name__, **ctx)
+            "Could not prune older secret versions; keep only the latest "
+            "two by hand",
+            step="prune_versions", error=type(exc).__name__, **ctx)
 
 
 def _safe_rollback(conn, ctx):
@@ -409,7 +479,9 @@ def main():
 
     log(logging.INFO, "Rotation job starting",
         instance=config.instance_connection_name,
-        users=list(config.mappings), admin_user=config.admin_user)
+        users=list(config.mappings),
+        old_password_users=list(config.old_mappings),
+        admin_user=config.admin_user)
 
     store = SecretStore(config.project_id)
     # Lazy refresh: the job is short-lived, so fetch the client certificate

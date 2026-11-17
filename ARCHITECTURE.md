@@ -27,14 +27,14 @@ flowchart LR
         JOB[Cloud Run Job<br/>postgres-password-rotator-&lt;env&gt;]
         VPCC[Serverless VPC<br/>Access connector]
         SQL[(Cloud SQL<br/>staging-database<br/>private IP)]
-        SM[(Secret Manager<br/>*_pwd secrets)]
+        SM[(Secret Manager<br/>*_pwd and *_oldpwd secrets)]
     end
     GA -- OIDC token --> WIF
     GA -- push image --> AR
     GA -- update image --> JOB
     SCH -- "POST :run (OAuth)" --> JOB
     AR -. pull .-> JOB
-    JOB -- read / add / disable versions --> SM
+    JOB -- read / add / prune versions --> SM
     JOB --> VPCC -- "SQL over TLS" --> SQL
 ```
 
@@ -121,22 +121,30 @@ On each execution:
        participant SM as Secret Manager
        participant DB as Cloud SQL
        R->>SM: access latest version (old password, kept in memory)
+       R->>SM: add old password to <user>_oldpwd, prune it
        R->>R: generate password + SCRAM-SHA-256 verifier
        R->>DB: ALTER USER ... WITH PASSWORD '<verifier>' (uncommitted)
        R->>SM: add version (new password)
        R->>DB: COMMIT
-       R->>SM: disable all older enabled versions
+       R->>SM: prune: disable the previous version, destroy older ones
    ```
+
+   - Writing `<user>_oldpwd` fails → the user is skipped before the database
+     is touched; nothing has changed.
 
    - Secret write fails → the transaction is **rolled back**; DB and secret
      still both hold the old password.
    - `COMMIT` fails → the old password is **re-added** as the latest secret
      version, so the secret matches the DB again.
    - Both of those fail → logged at `CRITICAL`; needs manual repair.
-   - After a successful commit, every older enabled version is **disabled**,
-     so only the current password can be read. If that fails it's logged as a
+   - After a successful commit the secret is **pruned**: the new version stays
+     enabled, the one before it is **disabled**, and every older version is
+     **destroyed**, so a secret holds at most two passwords. `<user>_oldpwd`
+     is pruned the same way right after it's written. Secret Manager can't
+     delete a single version, so destroyed versions stay listed as
+     `DESTROYED`, without their value. If pruning fails it's logged as a
      `WARNING` and the rotation still counts as succeeded (DB and secret
-     already match); disable the leftovers by hand.
+     already match); clean up by hand.
 
    Only the SCRAM verifier, a salted hash, is sent to PostgreSQL. The plaintext
    password exists only in the job's memory and in Secret Manager, so it can't
@@ -173,7 +181,7 @@ anything tagged `deployed-*`, `candidate-*` or `prod-*`.
 | `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Cloud Build editor, Scheduler admin, VPC Access user, Artifact Registry writer, plus repository admin on `rotator-repo` to move and remove tags (dev only); object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
 | Cloud Run service agent of test (and later envs) | Cloud Run, pulling the image | `roles/artifactregistry.reader` on dev's `rotator-repo` only |
 | `sa-cicd-deployer` of test (and later envs) | GitHub Actions, deploying that env's job | Also `roles/artifactregistry.reader` on dev's `rotator-repo` only |
-| `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionManager` (add, list and disable versions) on the four `*_pwd` secrets only; `roles/cloudsql.client` conditioned to the target instance only |
+| `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionManager` (add, list, disable and destroy versions) on the four `*_pwd` secrets only; `roles/secretmanager.secretVersionManager` only (no read) on the four `*_oldpwd` secrets; `roles/cloudsql.client` conditioned to the target instance only |
 | `sa-rotator-scheduler-<env>` | Cloud Scheduler | `roles/run.invoker` on this job only |
 
 Notes:
@@ -191,7 +199,8 @@ Notes:
 | --- | --- | --- |
 | Cloud SQL `staging-database` | Target database; reached on private IP from `ingka-dp-vpc-1` VPC; server requires trusted client certificates (mTLS via the Cloud SQL connector) | **Not** Terraform (data source only) |
 | Secret Manager `*_pwd` secrets | Source of current and store of new passwords | **Not** Terraform (data source only) |
-| Serverless VPC Access connector `pg-rotator-conn-<env>` | Gives the job a path into `ingka-dp-vpc-1` VPC (`vpc_connector_cidr`, `10.8.0.0/28` in dev; egress `PRIVATE_RANGES_ONLY`) | Terraform |
+| Secret Manager `*_oldpwd` secrets | The password each rotation replaced, for ops | **Not** Terraform (data source only) |
+| Serverless VPC Access connector `pg-rotator-conn-<env>` | Gives the job a path into `ingka-dp-vpc-1` VPC (`vpc_connector_cidr`, `10.3.0.0/28` in dev, `10.8.0.0/28` in test; egress `PRIVATE_RANGES_ONLY`) | Terraform |
 | Private Services Access on `ingka-dp-vpc-1` VPC | Peering that gives Cloud SQL its private IP | Set up manually, outside Terraform |
 | Artifact Registry `rotator-repo` (dev only) | The single image store for all environments; keeps the 10 newest builds, the 5 newest PR previews, and every image tagged `deployed-*`, `candidate-*` or `prod-*`; deletes all others | Terraform |
 | Cloud Run Job | Runs the container (1 task, 600 s timeout, 1 retry) | Terraform (image: CI) |

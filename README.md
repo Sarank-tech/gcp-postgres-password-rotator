@@ -120,7 +120,7 @@ Terraform state. The code is the same everywhere; only
 | --- | --- | --- |
 | dev | `ingka-dp-sap-dev` | Automatic on every merge to `main`, or a PR preview |
 | test | `ingka-dp-sap-test` | Approved promotion PR, same image as dev |
-| stage | _not set up yet_ | Approved promotion PR |
+| stage | `ingka-dp-sap-stage` | Approved promotion PR (being set up) |
 | prod | _not set up yet_ | Approved promotion PR |
 
 `main` is the only long-lived code branch, with short-lived `feature/*` and
@@ -132,9 +132,9 @@ The `prod` branch is the confirmed production copy. See [CICD.md](CICD.md).
 
 Run once per environment, using a user account with admin access to that
 environment's project (the "bootstrap account"). CI can't do this, because it
-can only authenticate once Terraform has created Workload Identity Federation
-in the project. After this, application deploys go through CI, and this
-account is only needed for Terraform changes.
+can't create the identity it signs in with. After this, Terraform and
+application deploys both go through CI, and this account is only needed to
+repair the pipeline itself.
 
 Below, `<env>` is `dev`, `test`, ... and `<project>` is that environment's
 project from the table above.
@@ -153,11 +153,8 @@ gcloud auth application-default set-quota-project <project>
 
 **2. Check the account's access.** It needs `roles/owner` on the project, or
 at least: Service Usage Admin, Service Account Admin, Project IAM Admin,
-Workload Identity Pool Admin, Cloud Run Admin, Cloud Scheduler Admin,
-Serverless VPC Access Admin, Artifact Registry Administrator (dev only), Service Account
-User, Cloud SQL Viewer, Secret Manager Admin (to grant access on the password
-secrets), and Storage Admin on the state bucket. No custom-role permissions
-are needed.
+Workload Identity Pool Admin and Storage Admin on the state bucket. No
+custom-role permissions are needed.
 
 **3. Create what Terraform expects to already exist:**
 
@@ -191,18 +188,16 @@ Also required, and not created by Terraform:
   subnet, the Private Services Access range, another connector, or a route
   learned through peering.
 
-**4. Apply:**
+**4. Bootstrap the Terraform pipeline** (Cloud Shell works):
 
 ```sh
-cd terraform
-terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
-terraform plan -var-file=envs/<env>.tfvars -out <env>.tfplan
-terraform apply <env>.tfplan
+bash terraform/bootstrap.sh <env> <project>
 ```
 
-`-reconfigure` matters when you switch environments in the same checkout:
-without it, Terraform may offer to copy one environment's state into
-another's bucket. Answer **no** if it ever asks.
+It creates the GitHub Workload Identity pool and provider (if missing) and
+the pipeline's two service accounts: `sa-terraform` (applies, only from
+`main`) and `sa-terraform-plan` (read-only, plans on PRs). It's safe to run
+again. It prints the line to add to `.github/terraform-envs.json`.
 
 **5. Create the GitHub Environment.** In the repository, go to Settings ->
 Environments -> New environment `<env>`, and add these variables:
@@ -211,14 +206,20 @@ Environments -> New environment `<env>`, and add these variables:
 | --- | --- |
 | `PROJECT_ID` | `<project>` |
 | `REGION` | `europe-west1` |
-| `WIF_PROVIDER` | `terraform output -raw wif_provider_name` |
-| `DEPLOY_SA` | `terraform output -raw cicd_service_account_email` |
+| `WIF_PROVIDER` | `projects/<project-number>/locations/global/workloadIdentityPools/github-actions-pool-<env>/providers/github-provider-<env>` |
+| `DEPLOY_SA` | `sa-cicd-deployer@<project>.iam.gserviceaccount.com` |
 
 Set **Deployment branches** to `main` only (dev: no restriction, for PR
-previews). Approvals happen on the promotion PRs, so environment reviewers
-are optional. Use environment *variables*, not secrets. The other GitHub
-settings (repository variables, branch protection, labels) are listed in
-[CICD.md](CICD.md#github-settings).
+previews), and reviewers if the environment needs them: they approve both
+deploys and Terraform applies. Use environment *variables*, not secrets. The
+other GitHub settings (repository variables, branch protection, labels) are
+listed in [CICD.md](CICD.md#github-settings).
+
+**6. Open a PR** adding `terraform/envs/<env>.tfvars`,
+`terraform/envs/<env>.backend.hcl`, the environment in
+`.github/terraform-envs.json`, and the environment in
+`.github/workflows/terraform.yaml`. The PR shows the plan; merging creates the
+environment. See [CICD.md](CICD.md#adding-an-environment).
 
 ## Deploying
 
@@ -234,15 +235,9 @@ Details, rollback and disaster restore: [CICD.md](CICD.md). Only `main` of
 this repository can authenticate to test, stage and prod; PRs can reach dev
 only.
 
-**Infrastructure:** run Terraform by hand, one environment at a time,
-dev first (CI does not run it):
-
-```sh
-cd terraform
-terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
-terraform plan -var-file=envs/<env>.tfvars -out <env>.tfplan
-terraform apply <env>.tfplan
-```
+**Infrastructure:** change `terraform/` in a PR. The PR gets a plan comment
+per environment; merging applies dev, then test, then stage, each after its
+environment's approval. See [CICD.md](CICD.md#infrastructure-changes).
 
 **Run a rotation now** (changes real passwords):
 
@@ -264,4 +259,4 @@ logged.
    environment that has the user.
 3. Make sure `postgres` can change that user's password (PostgreSQL 16:
    `GRANT <user> TO postgres WITH ADMIN OPTION;`).
-4. Run Terraform for each of those environments (see Deploying).
+4. Merge the PR; the Terraform pipeline applies it (see Deploying).

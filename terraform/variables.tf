@@ -73,7 +73,7 @@ variable "github_allowed_ref" {
 }
 
 variable "github_allow_pull_requests" {
-  description = "Also accept tokens from pull request runs (refs/pull/*), for PR preview deploys. Dev only: higher environments must accept main only."
+  description = "Let pull request runs (refs/pull/*) use the deployer SA, for PR preview deploys. Dev only: elsewhere only main may deploy."
   type        = bool
   default     = false
 }

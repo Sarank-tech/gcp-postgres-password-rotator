@@ -1,0 +1,5 @@
+{
+  "dev": { "project_id": "ingka-dp-sap-dev", "project_number": "1092455534132" },
+  "test": { "project_id": "ingka-dp-sap-test", "project_number": "1051284681247" },
+  "stage": { "project_id": "ingka-dp-sap-stage", "project_number": "47183561456" }
+}

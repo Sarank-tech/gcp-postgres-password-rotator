@@ -42,7 +42,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | dev | `ingka-dp-sap-dev` | Every merge to `main` (automatic), or a PR preview | Live |
 | test | `ingka-dp-sap-test` | Merging a "Promote build N to test" PR | Live |
-| stage | _tbd_ | Merging a "Promote build N to stage" PR | Not set up |
+| stage | `ingka-dp-sap-stage` | Merging a "Promote build N to stage" PR | Being set up |
 | prod | _tbd_ | Merging a "Promote build N to prod" PR | Not set up |
 
 Each environment has its own GCP project, Terraform state bucket
@@ -138,6 +138,8 @@ it.
 | `promotion-check.yaml` | Promotion check | Every PR to `main` | Validates promotion PRs (other PRs pass at once); removes the candidate tag when a promotion PR is closed unmerged |
 | `deploy.yaml` | Deploy promoted build | Merge changing `deploy/*.json` | Verifies and deploys the recorded image, moves `deployed-<env>` |
 | `confirm-prod.yaml` | Confirm prod stable | Manual (the button) | Release tag, `prod` branch, GitHub Release |
+| `terraform.yaml` | Terraform | PR or merge changing `terraform/`; manual | Plan per environment as a PR comment; on merge applies dev → test → stage |
+| `terraform-apply.yaml` | Terraform apply | Called by `terraform.yaml` | Applies one environment (plans again, stops on destroys) |
 
 `.github/scripts/promotion.sh` holds the shared settings: which environments
 are enabled and their order.
@@ -175,10 +177,14 @@ builds dev makes in between. Only builds nobody uses rotate out.
 | `WIF_PROVIDER` | `terraform output -raw wif_provider_name` | same, for test | same, for that env |
 | `DEPLOY_SA` | `terraform output -raw cicd_service_account_email` | same, for test | same, for that env |
 | Deployment branches | **No restriction** (PR previews run from PR branches) | `main` only | `main` only |
-| Required reviewers | none | none (the promotion PR is the approval) | optional extra lock |
+| Required reviewers | none | optional | recommended |
 
 Use **Environment variables**, not secrets. These values are identifiers,
 not credentials, and secrets would mask them in logs and block job outputs.
+
+Required reviewers on an environment are asked twice per change that reaches
+it: for a promotion deploy, and for a Terraform apply. Without reviewers, the
+PR approval is the only one (the apply runs right after merge).
 
 ### Repository variables (Settings → Secrets and variables → Actions → Variables)
 
@@ -221,16 +227,22 @@ it. If GitHub Actions can't be added to the bypass list in your org, leave
 
 ## Authentication
 
-There are no service account keys. Each environment's Terraform creates a
-Workload Identity pool and provider that only accept GitHub OIDC tokens from
-`ingka-group-digital/mdm-postgrespwd-rotator`, and:
+There are no service account keys. Each environment has a Workload Identity
+pool and provider that only accept GitHub OIDC tokens from
+`ingka-group-digital/mdm-postgrespwd-rotator`, from `main` or from pull
+request runs. Which service account a run may then use depends on where it
+runs:
 
-- in **test, stage and prod**: only from `refs/heads/main`,
-- in **dev**: also from pull request runs (`refs/pull/*`), for previews
-  (`github_allow_pull_requests = true` in `envs/dev.tfvars`).
+| Service account | `main` | Pull request |
+| --- | --- | --- |
+| `sa-terraform` (apply) | yes | no |
+| `sa-terraform-plan` (read-only) | yes | yes |
+| `sa-cicd-deployer`, test / stage / prod | yes | no |
+| `sa-cicd-deployer`, dev | yes | yes (previews; `github_allow_pull_requests = true` in `envs/dev.tfvars`) |
 
-A PR, even one that edits a workflow, can therefore reach dev but never a
-higher environment. PRs from forks get no credentials at all.
+A PR, even one that edits a workflow, can therefore deploy to dev and read
+the other environments (for the plan), but never change them. PRs from forks
+get no credentials at all.
 
 Workflows switch identities as needed: dev's (the registry: verify and tag
 images) and the target environment's (deploy its job). `sa-cicd-deployer` in
@@ -239,43 +251,64 @@ as its runtime service account.
 
 ## Infrastructure changes
 
-CI deploys the application only. Terraform is run by hand, one environment at
-a time, dev first:
+Terraform runs in the pipeline (`terraform.yaml`), never from a laptop:
+
+1. **PR**: change `terraform/`. For every environment the pipeline posts a
+   comment **Terraform plan: <env>** with the summary (`Plan: X to add, Y to
+   change, Z to destroy`) and the full plan, and updates it on every push.
+   Reviewers (code owners) get the comment by email. Anything destroyed or
+   replaced is listed with a ⚠️.
+2. **Merge**: the pipeline applies **dev**, then **test**, then **stage**.
+   Each one plans again (the PR's plan may be out of date) and applies exactly
+   that plan, after its GitHub environment's approval if it has reviewers.
+   If one fails, the later ones don't run.
+3. **Destroys stop the apply.** If a plan destroys or replaces anything other
+   than an IAM binding, that environment stops before changing anything. If
+   it's intended: **Actions → Terraform → Run workflow**, pick the
+   environment, tick **Allow a plan that destroys or replaces resources**.
+4. **Re-run one environment** (e.g. after fixing a permission): **Actions →
+   Terraform → Run workflow** with that environment.
+
+Merges that only change `terraform/` don't build a new image.
+
+`sa-terraform` and `sa-terraform-plan` are created once per environment by
+`terraform/bootstrap.sh` and are not managed by Terraform: the pipeline can't
+create its own identity. The bootstrap also creates the Workload Identity pool
+in a new environment; Terraform adopts it on the first apply (`import` blocks
+in `main.tf`).
+
+**By hand, only to repair the pipeline** (from `terraform/`; on Windows
+PowerShell quote the `-backend-config=...` and `-var-file=...` arguments):
 
 ```sh
-cd terraform
 terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
 terraform plan -var-file=envs/<env>.tfvars -out <env>.tfplan
 terraform apply <env>.tfplan
 ```
 
-On Windows PowerShell, quote the arguments:
-`"-backend-config=envs/<env>.backend.hcl"`, `"-var-file=envs/<env>.tfvars"`.
+Always `init` for the environment before its `plan`. A plan that destroys
+another environment's resources means the backend points at the wrong state:
+don't apply it.
 
-- Always run `init` for the environment before its `plan`. A plan that wants
-  to destroy resources of the other environment's project means the backend
-  is pointing at the wrong state: don't apply it.
-- `project_id` and `environment` have no defaults, so forgetting `-var-file`
-  fails instead of silently targeting dev.
-- A new environment's first apply has to be run locally: CI can't
-  authenticate until that apply has created Workload Identity Federation.
-- Planned: move Terraform into the pipeline (plan on PR, apply with approval)
-  with its own service account, before stage and prod are set up.
+## Adding an environment
 
-## Adding stage and prod
-
-1. Create the state bucket `mdm-postgrespwd-tfstate-<env>` (versioned,
-   uniform access, public access prevention).
-2. Add `terraform/envs/<env>.tfvars` (with `create_artifact_registry = false`)
-   and `terraform/envs/<env>.backend.hcl`, and run the first apply.
-3. Add the new project to `image_reader_projects` in `envs/dev.tfvars` and
-   apply dev.
-4. Create the GitHub Environment with its variables and `main`-only
-   deployment branches.
-5. Add the environment to `PROMOTION_ENVS` in `.github/scripts/promotion.sh`
-   and to the `environment` choices in `promote.yaml`.
-
-No other workflow changes are needed.
+1. **Manual, once** (see [README.md](README.md#first-time-environment-setup)):
+   state bucket, secrets, database grants, a free `/28`, then
+   `bash terraform/bootstrap.sh <env> <project>`.
+2. **GitHub**: create the environment with its variables, `main`-only
+   deployment branches, and reviewers.
+3. **PR 1, create it**: `terraform/envs/<env>.tfvars` (with
+   `create_artifact_registry = false`), `terraform/envs/<env>.backend.hcl`,
+   the environment in `.github/terraform-envs.json`, and in
+   `.github/workflows/terraform.yaml` (plan matrix, choice list, an apply job
+   after the previous environment). Check the plan comment, merge: the
+   pipeline creates the environment.
+4. **PR 2, enable promotions**: the new project in `image_reader_projects`
+   in `envs/dev.tfvars` (it must exist first, which is why this is a second
+   PR), the environment in `PROMOTION_ENVS` in `.github/scripts/promotion.sh`
+   and in the `environment` choices in `promote.yaml`. Merge: the pipeline
+   applies dev.
+5. **First deploy**: Create promotion PR → the new environment.
 
 ## Troubleshooting
 
@@ -289,4 +322,7 @@ No other workflow changes are needed.
 | `is not build N (missing, or cleaned up)` | The build was cleaned up before it was promoted; promote a newer one |
 | `can only get the build <env> runs` | Stage/prod promotion of a build the previous environment doesn't run |
 | Deploy fails with `artifactregistry.repositories.downloadArtifacts` denied | The environment's project missing from `image_reader_projects` in `envs/dev.tfvars`, or dev not applied since |
+| Terraform plan: `Can't sign in to <env> as sa-terraform-plan` | `terraform/bootstrap.sh` not run for that environment, or (test, first PR only) the pool doesn't accept pull request runs until this pipeline's first change is applied |
+| Terraform apply: `destroys or replaces resources; nothing was applied` | Intended? Run **Terraform** manually for that environment with *Allow a plan that destroys or replaces resources*. Otherwise fix the change |
+| Terraform apply fails with `403` / `Permission denied` | `sa-terraform` lacks a role for what the change touches: add it in `terraform/bootstrap.sh`, run it again, re-run the apply |
 | Deploy succeeds but rotation fails | Not a pipeline problem: check the job's logs (Cloud SQL permissions, network path, secrets) |

@@ -4,12 +4,16 @@ name: Build and deploy to dev
 # (the only one), and deploys it to dev. Higher environments get that exact
 # image later through promotion PRs (promote.yaml), never a rebuild.
 #
-# Merges that only change deploy/ (promotions) or docs don't build.
+# Merges that only change deploy/ (promotions), Terraform (terraform.yaml
+# applies it) or docs don't build.
 on:
   push:
     branches: [main]
     paths-ignore:
       - "deploy/**"
+      - "terraform/**"
+      - ".github/terraform-envs.json"
+      - ".github/workflows/terraform*.yaml"
       - "**/*.md"
   workflow_dispatch:
 

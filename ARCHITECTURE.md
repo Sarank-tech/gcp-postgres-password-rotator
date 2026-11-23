@@ -11,7 +11,7 @@ Three separate concerns, each owned by one part of the repo:
 | Concern | Owner | How it changes |
 | --- | --- | --- |
 | Rotation logic | `rotator.py` (+ `Dockerfile`) | Merge to `main` → GitHub Actions builds once and deploys dev; promotion PRs deploy higher environments |
-| GCP infrastructure | `terraform/` | `terraform apply`, run by hand |
+| GCP infrastructure | `terraform/` | PR to `main`: plan on the PR, applied on merge, environment by environment (`terraform.yaml`) |
 | Delivery pipeline | `.github/workflows/`, `.github/scripts/promotion.sh`, `deploy/<env>.json` | PR to `main` (see [CICD.md](CICD.md)) |
 | Environments | `terraform/envs/<env>.tfvars` + `<env>.backend.hcl`, GitHub Environments | One GCP project and one state bucket per environment (dev, test, stage, prod) |
 
@@ -68,9 +68,12 @@ flowchart LR
 ├── Dockerfile                  # python:3.11-slim, non-root, ENTRYPOINT rotator.py
 ├── .github/
 │   ├── CODEOWNERS              # Who approves PRs (incl. promotions)
-│   ├── scripts/promotion.sh    # Enabled environments and their order
+│   ├── terraform-envs.json     # Project id and number per environment
+│   ├── scripts/                # promotion.sh (enabled environments, order),
+│   │                           #   terraform helpers
 │   └── workflows/              # build, preview, promote, promotion-check,
-│                               #   deploy, confirm-prod (see CICD.md)
+│                               #   deploy, confirm-prod, terraform,
+│                               #   terraform-apply (see CICD.md)
 ├── deploy/
 │   └── <env>.json              # The build each environment above dev runs
 └── terraform/
@@ -83,6 +86,8 @@ flowchart LR
     │   ├── <env>.tfvars        # Per-environment values (committed; no secrets)
     │   └── <env>.backend.hcl   # Per-environment state bucket and prefix
     ├── outputs.tf              # WIF provider, SA emails, registry URL, ...
+    ├── bootstrap.sh            # One-time per environment: the pipeline's
+    │                           #   Terraform service accounts
     └── .terraform.lock.hcl     # Provider version lock (committed)
 ```
 
@@ -178,7 +183,9 @@ anything tagged `deployed-*`, `candidate-*` or `prod-*`.
 
 | Service account | Used by | Permissions |
 | --- | --- | --- |
-| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`, branch `main`) | Run admin, Cloud Functions developer, Cloud Build editor, Scheduler admin, VPC Access user, Artifact Registry writer, plus repository admin on `rotator-repo` to move and remove tags (dev only); object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
+| `sa-terraform` | The Terraform pipeline, applying (runs on `main` only). Created by `terraform/bootstrap.sh`, not by Terraform | Project IAM admin, service account admin and user, Workload Identity pool admin, Service Usage admin, Run admin, Scheduler admin, VPC Access admin, network viewer, Secret Manager admin, Cloud SQL viewer, Artifact Registry admin (dev only); storage admin on the state bucket |
+| `sa-terraform-plan` | The Terraform pipeline, planning on PRs. Created by `terraform/bootstrap.sh` | Viewer and security reviewer (read-only, IAM included); object viewer on the state bucket |
+| `sa-cicd-deployer` | GitHub Actions through WIF (only `ingka-group-digital/mdm-postgrespwd-rotator`; branch `main`, plus pull requests in dev) | Run admin, Cloud Functions developer, Cloud Build editor, Scheduler admin, VPC Access user, Artifact Registry writer, plus repository admin on `rotator-repo` to move and remove tags (dev only); object admin on the state bucket; `actAs` on `sa-db-rotator-<env>` only |
 | Cloud Run service agent of test (and later envs) | Cloud Run, pulling the image | `roles/artifactregistry.reader` on dev's `rotator-repo` only |
 | `sa-cicd-deployer` of test (and later envs) | GitHub Actions, deploying that env's job | Also `roles/artifactregistry.reader` on dev's `rotator-repo` only |
 | `sa-db-rotator-<env>` | The Cloud Run Job | `roles/secretmanager.secretAccessor` and `roles/secretmanager.secretVersionManager` (add, list, disable and destroy versions) on the four `*_pwd` secrets only; `roles/secretmanager.secretVersionManager` only (no read) on the four `*_oldpwd` secrets; `roles/cloudsql.client` conditioned to the target instance only |

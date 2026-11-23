@@ -2,14 +2,17 @@
 # Terraform settings & remote backend
 #
 # State lives in GCS, one bucket per environment. Backend blocks cannot use
-# variables, so the bucket and prefix come from envs/<env>.backend.hcl:
+# variables, so the bucket and prefix come from envs/<env>.backend.hcl.
+# The Terraform workflow (.github/workflows/terraform.yaml) runs this: plan on
+# PRs, apply on merge. By hand only to repair the pipeline itself:
 #
 #   terraform init -reconfigure -backend-config=envs/<env>.backend.hcl
 #   terraform plan -var-file=envs/<env>.tfvars
 ###############################################################################
 
 terraform {
-  required_version = ">= 1.5"
+  # 1.6+ for import blocks with expressions.
+  required_version = ">= 1.6"
 
   required_providers {
     google = {
@@ -73,8 +76,24 @@ resource "google_project_service" "apis" {
 # GitHub's OIDC tokens are exchanged for short-lived GCP credentials, so no
 # service account keys are ever created. Only workflows from the configured
 # repository can authenticate (enforced by attribute_condition AND by the
-# principalSet binding below).
+# principalSet bindings).
+#
+# terraform/bootstrap.sh creates the pool and provider in a new environment,
+# because the pipeline's own Terraform service accounts sign in through them
+# before Terraform has ever run there; Terraform then adopts them (import).
+# The bootstrap also creates those service accounts (sa-terraform, read-only
+# sa-terraform-plan); they are deliberately not managed here.
 ###############################################################################
+
+import {
+  to = google_iam_workload_identity_pool.github
+  id = "projects/${var.project_id}/locations/global/workloadIdentityPools/${local.wif_pool_id}"
+}
+
+import {
+  to = google_iam_workload_identity_pool_provider.github
+  id = "projects/${var.project_id}/locations/global/workloadIdentityPools/${local.wif_pool_id}/providers/${local.wif_provider_id}"
+}
 
 resource "google_iam_workload_identity_pool" "github" {
   workload_identity_pool_id = local.wif_pool_id
@@ -96,15 +115,12 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.ref"        = "assertion.ref"
   }
 
-  # Reject tokens from any other repository, and from any branch other than
-  # main, so a workflow edited on a feature branch can't deploy. Dev also
-  # accepts pull request runs (PR previews); higher environments never do.
-  attribute_condition = join("", [
-    "assertion.repository == \"${var.github_repository}\" && ",
-    "(assertion.ref == \"${var.github_allowed_ref}\"",
-    var.github_allow_pull_requests ? " || assertion.ref.startsWith(\"refs/pull/\")" : "",
-    ")",
-  ])
+  # Reject tokens from any other repository, and from branches other than
+  # main. Pull request runs are accepted for the read-only Terraform plan
+  # (and PR previews in dev); what a token may do is decided by the
+  # bindings: only main can deploy or apply outside dev.
+  # terraform/bootstrap.sh sets the same condition; keep them in step.
+  attribute_condition = "assertion.repository == \"${var.github_repository}\" && (assertion.ref == \"${var.github_allowed_ref}\" || assertion.ref.startsWith(\"refs/pull/\"))"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -146,11 +162,16 @@ resource "google_service_account_iam_member" "cicd_act_as_rotator" {
   member             = "serviceAccount:${google_service_account.cicd_deployer.email}"
 }
 
-# Allow identities from the GitHub repository to impersonate the deployer SA.
+# Who may impersonate the deployer SA: in dev any run of the repository
+# (PR previews deploy from pull requests), elsewhere runs on main only.
 resource "google_service_account_iam_member" "cicd_wif_binding" {
   service_account_id = google_service_account.cicd_deployer.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+  member = (
+    var.github_allow_pull_requests
+    ? "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+    : "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.ref/${var.github_allowed_ref}"
+  )
 }
 
 ###############################################################################

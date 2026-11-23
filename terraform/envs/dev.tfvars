@@ -29,5 +29,6 @@ vpc_connector_cidr = "10.3.0.0/28"
 
 # Dev hosts the only image registry; these environments run images from it.
 image_reader_projects = {
-  "ingka-dp-sap-test" = "1051284681247"
+  "ingka-dp-sap-test"  = "1051284681247"
+  "ingka-dp-sap-stage" = "47183561456"
 }

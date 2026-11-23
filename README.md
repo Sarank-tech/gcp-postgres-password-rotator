@@ -120,7 +120,7 @@ Terraform state. The code is the same everywhere; only
 | --- | --- | --- |
 | dev | `ingka-dp-sap-dev` | Automatic on every merge to `main`, or a PR preview |
 | test | `ingka-dp-sap-test` | Approved promotion PR, same image as dev |
-| stage | `ingka-dp-sap-stage` | Approved promotion PR (being set up) |
+| stage | `ingka-dp-sap-stage` | Approved promotion PR, same image as test |
 | prod | _not set up yet_ | Approved promotion PR |
 
 `main` is the only long-lived code branch, with short-lived `feature/*` and

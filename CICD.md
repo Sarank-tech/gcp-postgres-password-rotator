@@ -42,7 +42,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | dev | `ingka-dp-sap-dev` | Every merge to `main` (automatic), or a PR preview | Live |
 | test | `ingka-dp-sap-test` | Merging a "Promote build N to test" PR | Live |
-| stage | `ingka-dp-sap-stage` | Merging a "Promote build N to stage" PR | Being set up |
+| stage | `ingka-dp-sap-stage` | Merging a "Promote build N to stage" PR | Live |
 | prod | _tbd_ | Merging a "Promote build N to prod" PR | Not set up |
 
 Each environment has its own GCP project, Terraform state bucket

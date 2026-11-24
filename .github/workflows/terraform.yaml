@@ -100,8 +100,28 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      # A new environment has no state until its first apply, and creating it
+      # takes a lock this read-only identity can't write. Plan it against an
+      # empty local state instead: the same plan the first apply will make.
       - name: Init
-        run: terraform init -input=false -reconfigure "-backend-config=envs/${TARGET}.backend.hcl"
+        run: |
+          bucket="$(sed -n 's/^bucket *= *"\(.*\)"/\1/p' "envs/${TARGET}.backend.hcl")"
+          prefix="$(sed -n 's/^prefix *= *"\(.*\)"/\1/p' "envs/${TARGET}.backend.hcl")"
+          if ! listing="$(gcloud storage ls "gs://${bucket}/**" 2>&1)"; then
+            grep -q "matched no objects" <<< "${listing}" \
+              || { echo "::error::Can't read gs://${bucket}: ${listing}"; exit 1; }
+            listing=""
+          fi
+          if grep -qx "gs://${bucket}/${prefix}/default.tfstate" <<< "${listing}"; then
+            terraform init -input=false -reconfigure "-backend-config=envs/${TARGET}.backend.hcl"
+          else
+            echo "::notice::No Terraform state for ${TARGET} yet: planning it as a new environment."
+            printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
+            terraform init -input=false
+          fi
 
       # Read-only identity: it can't take the state lock, and doesn't need to.
       - name: Plan

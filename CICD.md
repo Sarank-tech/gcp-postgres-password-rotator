@@ -257,7 +257,9 @@ Terraform runs in the pipeline (`terraform.yaml`), never from a laptop:
    comment **Terraform plan: <env>** with the summary (`Plan: X to add, Y to
    change, Z to destroy`) and the full plan, and updates it on every push.
    Reviewers (code owners) get the comment by email. Anything destroyed or
-   replaced is listed with a ⚠️.
+   replaced is listed with a ⚠️. An environment Terraform hasn't created yet has
+   no state, so it's planned against an empty one: the plan shows everything
+   the first apply will create.
 2. **Merge**: the pipeline applies **dev**, then **test**, then **stage**.
    Each one plans again (the PR's plan may be out of date) and applies exactly
    that plan, after its GitHub environment's approval if it has reviewers.

@@ -11,7 +11,7 @@ Three separate concerns, each owned by one part of the repo:
 | Concern | Owner | How it changes |
 | --- | --- | --- |
 | Rotation logic | `rotator.py` (+ `Dockerfile`) | Merge to `main` → GitHub Actions builds once and deploys dev; promotion PRs deploy higher environments |
-| GCP infrastructure | `terraform/` | PR to `main`: plan on the PR, applied on merge, environment by environment (`terraform.yaml`) |
+| GCP infrastructure | `terraform/` | PR to `main`: plan on the PR, applied to dev on merge; test, stage and prod with their promotion PRs (`deploy.yaml`) |
 | Delivery pipeline | `.github/workflows/`, `.github/scripts/promotion.sh`, `deploy/<env>.json` | PR to `main` (see [CICD.md](CICD.md)) |
 | Environments | `terraform/envs/<env>.tfvars` + `<env>.backend.hcl`, GitHub Environments | One GCP project and one state bucket per environment (dev, test, stage, prod) |
 
@@ -168,11 +168,14 @@ Full detail in [CICD.md](CICD.md). In short:
   pushes `rotator:<sha>` to dev's registry, points dev's job at the digest,
   then tags it `build-N`, `latest` and `deployed-dev`.
 - **Promotion**: the *Create promotion PR* button opens a PR changing only
-  `deploy/<env>.json` to that build. Once approved and merged, `deploy.yaml`
-  verifies the image (tags `build-N` and the commit SHA) with dev's
-  identity, points the environment's job at the same digest in dev's
-  registry with that environment's identity, and moves the `deployed-<env>`
-  tag. Nothing is rebuilt or copied.
+  `deploy/<env>.json` to that build (and, if the environment's
+  infrastructure is behind `main`, its `infra` commit, with the plan posted
+  on the PR). Once approved and merged, `deploy.yaml` applies `terraform/` at
+  `infra` if it moved (as `sa-terraform`), verifies the image (tags
+  `build-N` and the commit SHA) with dev's identity, points the
+  environment's job at the same digest in dev's registry with that
+  environment's identity, and moves the `deployed-<env>` tag. Nothing is
+  rebuilt or copied. Rollbacks change the image only.
 - **Release**: *Confirm prod stable* tags the image `prod-<date>-build-<n>`,
   moves the `prod` branch and creates a GitHub Release.
 

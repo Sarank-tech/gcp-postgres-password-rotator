@@ -1,13 +1,20 @@
 name: Create promotion PR
 
-# The "button" for promoting a build to the next environment. Opens a PR that
-# changes only deploy/<env>.json to point at an existing build; merging that
-# PR deploys it (deploy.yaml). Nothing is rebuilt.
+# The "button" for promoting to the next environment. Opens a PR that
+# changes only deploy/<env>.json; merging that PR deploys it (deploy.yaml).
+# Nothing is rebuilt.
 #
 #   test   any build of main that reached dev (default: the newest)
 #   stage  the build test runs now
 #   prod   the build stage runs now
-# Rollback: give an earlier build the environment ran before.
+#
+# The PR also brings the environment's infrastructure up to main's
+# terraform/ if it is behind: its plan is posted on the PR, and merging
+# applies it before the image is deployed. Three kinds of PR:
+#   promotion        new build (+ infrastructure, if behind)
+#   rollback         an earlier build: image only, infrastructure unchanged
+#   infrastructure   the environment already runs the build, but its
+#                    infrastructure is behind: infrastructure only
 #
 # Requires: Settings -> Actions -> General -> "Allow GitHub Actions to create
 # and approve pull requests", and the REGISTRY_* repository variables.
@@ -20,7 +27,7 @@ on:
         # Add prod here when it exists (and in promotion.sh).
         options: [test, stage]
       build:
-        description: "Build number. Empty: newest in dev (test), or what the previous env runs. Earlier build: rollback"
+        description: "Build number. Empty: newest in dev (test), or what the previous env runs. Earlier build: rollback. The build it runs now: infrastructure only"
         type: string
         required: false
 
@@ -38,7 +45,7 @@ jobs:
   promote:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     env:
       TARGET: ${{ inputs.environment }}
@@ -47,6 +54,8 @@ jobs:
       REGISTRY_WIF_PROVIDER: ${{ vars.REGISTRY_WIF_PROVIDER }}
       REGISTRY_DEPLOY_SA: ${{ vars.REGISTRY_DEPLOY_SA }}
       GH_TOKEN: ${{ github.token }}
+      # Keep in step with terraform.yaml.
+      TERRAFORM_VERSION: "1.17.0"
 
     steps:
       - name: Check repository variables
@@ -117,24 +126,49 @@ jobs:
           summary="$(git log -1 --format=%s "${commit}")"
 
           target_file="deploy/${TARGET}.json"
-          current_build="" current_commit=""
+          current_build="" current_commit="" current_infra=""
           if [ -f "${target_file}" ]; then
             current_build="$(jq -r .build "${target_file}")"
             current_commit="$(jq -r .commit "${target_file}")"
+            current_infra="$(jq -r '.infra // empty' "${target_file}")"
           fi
-          [ "${current_build}" != "${build}" ] || { echo "::error::${TARGET} already runs build ${build}"; exit 1; }
+          main="$(git rev-parse HEAD)"
 
-          branch="promote/${TARGET}-build-${build}"
+          if [ "${current_build}" = "${build}" ]; then
+            infra_behind "${current_infra}" "${main}" \
+              || { echo "::error::${TARGET} already runs build ${build}, and its infrastructure is up to date"; exit 1; }
+            kind=infra
+          elif [ -n "${current_commit}" ] && ! git merge-base --is-ancestor "${current_commit}" "${commit}"; then
+            kind=rollback
+          else
+            kind=promotion
+          fi
+
+          # Rollbacks leave the infrastructure as it is.
+          infra="${current_infra}" apply_infra=false
+          if [ "${kind}" != "rollback" ] && infra_behind "${current_infra}" "${main}"; then
+            infra="${main}" apply_infra=true
+          fi
+
+          if [ "${kind}" = "infra" ]; then
+            branch="promote/${TARGET}-infra-${main::7}"
+            title="Apply infrastructure changes to ${TARGET} — $(git log -1 --format=%s "${main}" -- terraform)"
+          else
+            branch="promote/${TARGET}-build-${build}"
+            title="Promote build ${build} to ${TARGET} — ${summary}"
+            [ "${apply_infra}" = "false" ] || title="${title} (+ infrastructure)"
+          fi
           if git ls-remote --exit-code --heads origin "${branch}" > /dev/null; then
             echo "::error::Branch ${branch} already exists; a PR for this promotion is probably open"
             exit 1
           fi
 
           jq -n --argjson build "${build}" --arg commit "${commit}" \
-            --arg image "${image}@${digest}" --arg summary "${summary}" \
-            '{build: $build, commit: $commit, image: $image, summary: $summary}' > "${target_file}"
+            --arg image "${image}@${digest}" --arg summary "${summary}" --arg infra "${infra}" \
+            '{build: $build, commit: $commit, image: $image, summary: $summary,
+              infra: (if $infra == "" then null else $infra end)}' > "${target_file}"
 
-          # PR description: what's in it compared with what the env runs now.
+          # PR description: what's in it compared with what the env has now.
           server="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           {
             echo "| | |"
@@ -144,17 +178,35 @@ jobs:
             echo "| Image | \`${image}@${digest}\` |"
             echo "| Comes from | ${from} |"
             echo "| ${TARGET} runs now | ${current_build:+build }${current_build:-nothing recorded} |"
+            if [ "${apply_infra}" = "true" ]; then
+              echo "| Infrastructure | **Applied on merge**, before the image: \`terraform/\` at [\`${main::7}\`](${server}/commit/${main}). Plan in the comment below |"
+            else
+              echo "| Infrastructure | Unchanged |"
+            fi
             echo ""
-            if [ -z "${current_commit}" ]; then
+            if [ "${kind}" = "infra" ]; then
+              echo "### Infrastructure only"
+              echo "${TARGET} already runs build ${build}; only its infrastructure changes."
+            elif [ -z "${current_commit}" ]; then
               echo "### Changes"
               echo "First recorded promotion to ${TARGET}."
-            elif git merge-base --is-ancestor "${current_commit}" "${commit}"; then
+            elif [ "${kind}" = "promotion" ]; then
               echo "### Changes since build ${current_build}"
-              git log --first-parent --format='- %s (%h)' "${current_commit}..${commit}" -- . ':(exclude)deploy'
+              git log --first-parent --format='- %s (%h)' "${current_commit}..${commit}" -- . ':(exclude)deploy' ':(exclude)terraform'
             else
               echo "### ⚠️ Rollback from build ${current_build} to build ${build}"
-              echo "Changes being removed from ${TARGET}:"
-              git log --first-parent --format='- %s (%h)' "${commit}..${current_commit}" -- . ':(exclude)deploy'
+              echo "Image only: the infrastructure stays as it is. Changes being removed from ${TARGET}:"
+              git log --first-parent --format='- %s (%h)' "${commit}..${current_commit}" -- . ':(exclude)deploy' ':(exclude)terraform'
+            fi
+            if [ "${apply_infra}" = "true" ]; then
+              echo ""
+              if [ -n "${current_infra}" ]; then
+                echo "### Infrastructure changes since \`${current_infra::7}\`"
+                git log --first-parent --format='- %s (%h)' "${current_infra}..${main}" -- terraform
+              else
+                echo "### Infrastructure"
+                echo "No infrastructure recorded for ${TARGET} yet: brought up to main's \`terraform/\`. The plan shows what actually changes."
+              fi
             fi
             echo ""
             echo "### Sanity checklist (after merge and deploy)"
@@ -167,15 +219,19 @@ jobs:
             echo "build=${build}"
             echo "digest=${digest}"
             echo "branch=${branch}"
-            echo "title=Promote build ${build} to ${TARGET} — ${summary}"
+            echo "title=${title}"
+            echo "kind=${kind}"
+            echo "apply_infra=${apply_infra}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Open the PR
+        id: pr
         env:
           BUILD: ${{ steps.plan.outputs.build }}
           DIGEST: ${{ steps.plan.outputs.digest }}
           BRANCH: ${{ steps.plan.outputs.branch }}
           TITLE: ${{ steps.plan.outputs.title }}
+          KIND: ${{ steps.plan.outputs.kind }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -188,13 +244,55 @@ jobs:
           gh label create "env:${TARGET}" --color 1D76DB --force
           url="$(gh pr create --base main --head "${BRANCH}" --title "${TITLE}" \
             --body-file "${RUNNER_TEMP}/body.md" --label promotion --label "env:${TARGET}")"
+          echo "number=${url##*/}" >> "${GITHUB_OUTPUT}"
 
-          # Protect the build from cleanup while the PR is open.
-          gcloud artifacts docker tags add "${REPO}/rotator@${DIGEST}" \
-            "${REPO}/rotator:candidate-${TARGET}-build-${BUILD}" --quiet
+          # Protect the build from cleanup while the PR is open (an
+          # infrastructure-only PR's image is already protected: the
+          # environment runs it).
+          if [ "${KIND}" != "infra" ]; then
+            gcloud artifacts docker tags add "${REPO}/rotator@${DIGEST}" \
+              "${REPO}/rotator:candidate-${TARGET}-build-${BUILD}" --quiet
+          fi
 
           # PRs opened with GITHUB_TOKEN don't trigger pull_request workflows,
           # so start the check explicitly; it reports on the PR's commit.
           gh workflow run promotion-check.yaml --ref "${BRANCH}"
 
           echo "### Opened ${url}" >> "${GITHUB_STEP_SUMMARY}"
+
+      # The environment's read-only identity; the plan is what merging the
+      # PR applies (main's terraform/ at the commit recorded as "infra").
+      - name: Read ${{ inputs.environment }} settings
+        id: settings
+        if: steps.plan.outputs.apply_infra == 'true'
+        run: bash .github/scripts/terraform-env.sh "${TARGET}" sa-terraform-plan >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate to ${{ inputs.environment }}
+        if: steps.plan.outputs.apply_infra == 'true'
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ steps.settings.outputs.provider }}
+          service_account: ${{ steps.settings.outputs.service_account }}
+
+      - name: Set up Terraform
+        if: steps.plan.outputs.apply_infra == 'true'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Post the infrastructure plan on the PR
+        if: steps.plan.outputs.apply_infra == 'true'
+        working-directory: terraform
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          source ../.github/scripts/terraform.sh
+          ok=ok
+          tf_plan_readonly "${TARGET}" || ok=failed
+          cat plan.txt
+          tf_plan_markdown "${TARGET}" "${ok}" "Terraform plan: ${TARGET}" \
+            "applied when this PR is merged, before the image; [run](${RUN_URL})" > comment.md
+          tf_post_comment "${PR}" "${TARGET}" comment.md
+          [ "${ok}" = "ok" ] || { echo "::error::The plan for ${TARGET} failed; see the PR comment"; exit 1; }

@@ -218,8 +218,9 @@ listed in [CICD.md](CICD.md#github-settings).
 **6. Open a PR** adding `terraform/envs/<env>.tfvars`,
 `terraform/envs/<env>.backend.hcl`, the environment in
 `.github/terraform-envs.json`, and the environment in
-`.github/workflows/terraform.yaml`. The PR shows the plan; merging creates the
-environment. See [CICD.md](CICD.md#adding-an-environment).
+`.github/workflows/terraform.yaml`. The PR shows the plan. After merging,
+**Actions → Terraform → Run workflow** with the environment creates it. See
+[CICD.md](CICD.md#adding-an-environment).
 
 ## Deploying
 
@@ -236,8 +237,9 @@ this repository can authenticate to test, stage and prod; PRs can reach dev
 only.
 
 **Infrastructure:** change `terraform/` in a PR. The PR gets a plan comment
-per environment; merging applies dev, then test, then stage, each after its
-environment's approval. See [CICD.md](CICD.md#infrastructure-changes).
+per environment; merging applies dev. Test, stage and prod get it with their
+next promotion PR (which shows their plan), or with an infrastructure-only
+PR from the same button. See [CICD.md](CICD.md#infrastructure-changes).
 
 **Run a rotation now** (changes real passwords):
 

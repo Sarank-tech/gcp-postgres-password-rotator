@@ -1,13 +1,17 @@
 name: Terraform apply
 
-# Applies one environment; called by terraform.yaml, in order. Plans again
-# first (the PR's plan may be out of date), then applies exactly that plan.
-# Stops before applying if the plan destroys or replaces anything other than
-# IAM bindings, unless allow_destroy is set (Run workflow on terraform.yaml).
+# Applies one environment at commit "ref"; called by terraform.yaml (dev on
+# merge, or Run workflow to repair one environment). Plans again first, then
+# applies exactly that plan. Stops before applying if the plan destroys or
+# replaces anything other than IAM bindings, unless allow_destroy is set.
+# Promotions apply test, stage and prod from deploy.yaml instead.
 on:
   workflow_call:
     inputs:
       environment:
+        type: string
+        required: true
+      ref:
         type: string
         required: true
       allow_destroy:
@@ -45,6 +49,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Read environment settings
@@ -63,33 +68,7 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
-      - name: Init
-        run: terraform init -input=false -reconfigure "-backend-config=envs/${TARGET}.backend.hcl"
-
-      - name: Plan
-        run: |
-          terraform plan -input=false -no-color "-var-file=envs/${TARGET}.tfvars" -out=tfplan
-          terraform show -json tfplan > plan.json
-          {
-            echo "### Terraform ${TARGET}"
-            echo '```'
-            terraform show -no-color tfplan | grep -E '^(Plan:|No changes\.)' || true
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Check for destroys
-        run: |
-          destroys="$(bash ../.github/scripts/terraform-destroys.sh plan.json)"
-          if [ -n "${destroys}" ] && [ "${ALLOW_DESTROY}" != "true" ]; then
-            echo "::error::The plan for ${TARGET} destroys or replaces resources; nothing was applied:"
-            echo "${destroys}"
-            echo "If that's intended, run the Terraform workflow for ${TARGET} with 'Allow a plan that destroys or replaces resources'."
-            {
-              echo "**Stopped: destroys or replaces**"
-              sed 's/^/- `/; s/$/`/' <<< "${destroys}"
-            } >> "${GITHUB_STEP_SUMMARY}"
-            exit 1
-          fi
-
       - name: Apply
-        run: terraform apply -input=false -no-color tfplan
+        run: |
+          source ../.github/scripts/terraform.sh
+          tf_apply "${TARGET}" "${ALLOW_DESTROY}"

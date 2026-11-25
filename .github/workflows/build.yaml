@@ -13,6 +13,7 @@ on:
       - "deploy/**"
       - "terraform/**"
       - ".github/terraform-envs.json"
+      - ".github/scripts/terraform*.sh"
       - ".github/workflows/terraform*.yaml"
       - "**/*.md"
   workflow_dispatch:

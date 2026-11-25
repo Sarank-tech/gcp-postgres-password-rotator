@@ -43,18 +43,27 @@ tag_digest() {
   all_tags "$1" | awk -v t="$2" '$1 == t { print $2 }'
 }
 
-# Fails unless deploy/<env>.json at $1 is a valid promotion record.
+# Fails unless deploy/<env>.json at $1 is a valid promotion record. "infra"
+# (the commit of main whose terraform/ the environment has) is missing in
+# records from before infrastructure was promoted.
 check_record() {
   local file="$1" repo="$2"
   jq -e --arg repo "${repo}/rotator@" '
     (.build | type == "number") and
     (.commit | test("^[0-9a-f]{40}$")) and
     (.image | startswith($repo)) and
-    (.image | test("@sha256:[0-9a-f]{64}$"))
+    (.image | test("@sha256:[0-9a-f]{64}$")) and
+    (.infra == null or (.infra | test("^[0-9a-f]{40}$")))
   ' "${file}" > /dev/null || {
-    echo "::error::${file} is not a valid promotion record (build, commit, image from ${repo}/rotator)"
+    echo "::error::${file} is not a valid promotion record (build, commit, image from ${repo}/rotator, infra)"
     return 1
   }
+}
+
+# Succeeds if an environment whose infrastructure is at commit $1 (empty:
+# not recorded) is behind commit $2, i.e. terraform/ differs between them.
+infra_behind() {
+  [ -z "$1" ] || ! git diff --quiet "$1" "$2" -- terraform
 }
 
 # Succeeds if deploy/$1.json named image $2 at some point in the history of

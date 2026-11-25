@@ -19,8 +19,13 @@ A hybrid of trunk-based development and per-environment control:
 - **One PR per environment.** Promoting build `N` to test (and later stage,
   prod) is its own PR, created with a button, reviewed and approved like any
   other. Merging it deploys the build.
-- **`deploy/<env>.json` says what each environment runs**, so `main` always
-  shows the state of every environment.
+- **Infrastructure travels with promotions.** A Terraform change is applied
+  to dev on merge; test, stage and prod get it with their next promotion PR,
+  which shows that environment's plan. Nothing reaches test, stage or prod
+  without its own approved PR: code or infrastructure.
+- **`deploy/<env>.json` says what each environment runs** (build and
+  infrastructure version), so `main` always shows the state of every
+  environment.
 - **`prod` branch = the confirmed production copy.** After the prod sanity
   check, a button moves it to the released commit and creates a GitHub
   Release.
@@ -84,13 +89,26 @@ to dev. The run summary shows the build number.
    `Promote build 142 to test — Disable previous secret versions`. Its
    description shows the build, the image, what the environment runs now, the
    list of changes included, and a sanity checklist.
-4. A code owner reviews and approves; you merge. The build is deployed to
-   that environment within a minute or two.
+   - If the environment's infrastructure is behind `main`'s `terraform/`, the
+     title ends in **(+ infrastructure)**, the description lists the
+     Terraform changes, and a comment **Terraform plan: <env>** shows exactly
+     what will change.
+4. A code owner reviews and approves; you merge. The infrastructure (if any)
+   is applied first, then the build is deployed.
 5. Run the job there and tick off the checklist.
+
+**Infrastructure only.** If the environment already runs the build but its
+infrastructure is behind (a Terraform-only change was merged), the same
+button opens **Apply infrastructure changes to <env> — …** instead: leave the
+build empty (test: if it runs the newest build; stage: if it runs test's
+build), or enter the build it runs now.
 
 The order is enforced: test takes any build that reached dev, stage only the
 build test runs, prod only the build stage runs. The only exception is a
-rollback to a build the environment ran before.
+rollback to a build the environment ran before. A **rollback changes the
+image only**: the infrastructure stays as it is (to undo a Terraform change,
+revert it on `main` and promote that). Infrastructure only ever moves forward
+along `main`.
 
 ### 4. Release to prod
 
@@ -138,7 +156,7 @@ it.
 | `promotion-check.yaml` | Promotion check | Every PR to `main` | Validates promotion PRs (other PRs pass at once); removes the candidate tag when a promotion PR is closed unmerged |
 | `deploy.yaml` | Deploy promoted build | Merge changing `deploy/*.json` | Verifies and deploys the recorded image, moves `deployed-<env>` |
 | `confirm-prod.yaml` | Confirm prod stable | Manual (the button) | Release tag, `prod` branch, GitHub Release |
-| `terraform.yaml` | Terraform | PR or merge changing `terraform/`; manual | Plan per environment as a PR comment; on merge applies dev → test → stage |
+| `terraform.yaml` | Terraform | PR or merge changing `terraform/`; manual | Plan per environment as PR comments; on merge applies dev; manual: re-apply one environment (repair) |
 | `terraform-apply.yaml` | Terraform apply | Called by `terraform.yaml` | Applies one environment (plans again, stops on destroys) |
 
 `.github/scripts/promotion.sh` holds the shared settings: which environments
@@ -251,25 +269,34 @@ as its runtime service account.
 
 ## Infrastructure changes
 
-Terraform runs in the pipeline (`terraform.yaml`), never from a laptop:
+Terraform runs in the pipeline, never from a laptop, and reaches each
+environment the way code does:
 
 1. **PR**: change `terraform/`. For every environment the pipeline posts a
    comment **Terraform plan: <env>** with the summary (`Plan: X to add, Y to
    change, Z to destroy`) and the full plan, and updates it on every push.
    Reviewers (code owners) get the comment by email. Anything destroyed or
-   replaced is listed with a ⚠️. An environment Terraform hasn't created yet has
-   no state, so it's planned against an empty one: the plan shows everything
-   the first apply will create.
-2. **Merge**: the pipeline applies **dev**, then **test**, then **stage**.
-   Each one plans again (the PR's plan may be out of date) and applies exactly
-   that plan, after its GitHub environment's approval if it has reviewers.
-   If one fails, the later ones don't run.
-3. **Destroys stop the apply.** If a plan destroys or replaces anything other
-   than an IAM binding, that environment stops before changing anything. If
-   it's intended: **Actions → Terraform → Run workflow**, pick the
-   environment, tick **Allow a plan that destroys or replaces resources**.
-4. **Re-run one environment** (e.g. after fixing a permission): **Actions →
-   Terraform → Run workflow** with that environment.
+   replaced is listed with a ⚠️. An environment Terraform hasn't created yet
+   has no state, so it's planned against an empty one.
+2. **Merge**: the pipeline applies **dev** (`terraform.yaml`).
+3. **Test, stage, prod**: with their next **promotion PR**. The button
+   notices the environment's infrastructure is behind `main` and includes it:
+   the PR gets that environment's plan as a comment, and merging it applies
+   `terraform/` at the commit recorded as `infra` in `deploy/<env>.json`,
+   then deploys the image (`deploy.yaml`). With no new build to promote, the
+   button opens an infrastructure-only PR (see Day-to-day, step 3).
+4. **Destroys stop the apply.** If a plan destroys or replaces anything other
+   than an IAM binding, the environment stops before changing anything (a
+   promotion then doesn't deploy its image either). If it's intended:
+   **Actions → Terraform → Run workflow**, pick the environment, tick **Allow
+   a plan that destroys or replaces resources**, then re-run the failed
+   *Deploy promoted build* run.
+5. **Re-apply one environment** (e.g. after fixing a permission): **Actions →
+   Terraform → Run workflow**. Dev is applied at `main`; test, stage and prod
+   at the infrastructure version recorded for them, never newer.
+
+Rollbacks don't touch infrastructure, and infrastructure never moves
+backwards: the promotion check rejects both.
 
 Merges that only change `terraform/` don't build a new image.
 
@@ -302,9 +329,10 @@ don't apply it.
 3. **PR 1, create it**: `terraform/envs/<env>.tfvars` (with
    `create_artifact_registry = false`), `terraform/envs/<env>.backend.hcl`,
    the environment in `.github/terraform-envs.json`, and in
-   `.github/workflows/terraform.yaml` (plan matrix, choice list, an apply job
-   after the previous environment). Check the plan comment, merge: the
-   pipeline creates the environment.
+   `.github/workflows/terraform.yaml` (plan matrix and choice list). Check
+   the plan comment and merge (that applies dev only). Then create the
+   environment: **Actions → Terraform → Run workflow** with the new
+   environment.
 4. **PR 2, enable promotions**: the new project in `image_reader_projects`
    in `envs/dev.tfvars` (it must exist first, which is why this is a second
    PR), the environment in `PROMOTION_ENVS` in `.github/scripts/promotion.sh`
@@ -325,6 +353,8 @@ don't apply it.
 | `can only get the build <env> runs` | Stage/prod promotion of a build the previous environment doesn't run |
 | Deploy fails with `artifactregistry.repositories.downloadArtifacts` denied | The environment's project missing from `image_reader_projects` in `envs/dev.tfvars`, or dev not applied since |
 | Terraform plan: `Can't sign in to <env> as sa-terraform-plan` | `terraform/bootstrap.sh` not run for that environment, or (test, first PR only) the pool doesn't accept pull request runs until this pipeline's first change is applied |
-| Terraform apply: `destroys or replaces resources; nothing was applied` | Intended? Run **Terraform** manually for that environment with *Allow a plan that destroys or replaces resources*. Otherwise fix the change |
+| Terraform apply: `destroys or replaces resources; nothing was applied` | Intended? Run **Terraform** manually for that environment with *Allow a plan that destroys or replaces resources* (then re-run the failed *Deploy promoted build*). Otherwise fix the change |
+| Button: `already runs build N, and its infrastructure is up to date` | Nothing to promote: the environment has that build and `main`'s `terraform/` |
+| Promotion check: `A rollback changes only the image` / `Infrastructure can only move forward` | The record was edited by hand; use the button |
 | Terraform apply fails with `403` / `Permission denied` | `sa-terraform` lacks a role for what the change touches: add it in `terraform/bootstrap.sh`, run it again, re-run the apply |
 | Deploy succeeds but rotation fails | Not a pipeline problem: check the job's logs (Cloud SQL permissions, network path, secrets) |

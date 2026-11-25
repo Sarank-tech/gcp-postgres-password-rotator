@@ -1,8 +1,10 @@
 name: Deploy promoted build
 
 # Runs when a promotion PR (one that changes deploy/<env>.json) is merged.
-# Deploys exactly the image the file names, from dev's registry; nothing is
-# rebuilt or copied.
+# If the record's "infra" moved, first applies terraform/ at that commit to
+# the environment; then deploys exactly the image the file names, from dev's
+# registry (nothing is rebuilt or copied). Either part is skipped when it
+# didn't change (rollback: image only; infrastructure-only PR: no image).
 on:
   push:
     branches: [main]
@@ -53,6 +55,8 @@ jobs:
 
     env:
       TARGET: ${{ matrix.env }}
+      # Keep in step with terraform.yaml.
+      TERRAFORM_VERSION: "1.17.0"
       PROJECT_ID: ${{ vars.PROJECT_ID }}
       REGION: ${{ vars.REGION }}
       WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
@@ -86,7 +90,12 @@ jobs:
           check_record "${file}" "${REPO}"
           from="$(previous_env "${TARGET}")"
           image="$(jq -r .image "${file}")"
-          if [ "${from}" != "dev" ] \
+          infra="$(jq -r '.infra // empty' "${file}")"
+          old="$(git show "${BEFORE}:${file}" 2>/dev/null)" || old='{}'
+          image_changed=false infra_changed=false
+          [ "${image}" = "$(jq -r '.image // empty' <<< "${old}")" ] || image_changed=true
+          [ -z "${infra}" ] || [ "${infra}" = "$(jq -r '.infra // empty' <<< "${old}")" ] || infra_changed=true
+          if [ "${image_changed}" = "true" ] && [ "${from}" != "dev" ] \
              && [ "$(jq -r .image "deploy/${from}.json" 2>/dev/null)" != "${image}" ] \
              && ! ran_before "${TARGET}" "${image}" "${BEFORE}"; then
             echo "::error::${TARGET} can only get the build ${from} runs, or roll back to a build it ran before"
@@ -95,7 +104,10 @@ jobs:
           {
             echo "build=$(jq -r .build "${file}")"
             echo "commit=$(jq -r .commit "${file}")"
-            echo "image=$(jq -r .image "${file}")"
+            echo "image=${image}"
+            echo "infra=${infra}"
+            echo "image_changed=${image_changed}"
+            echo "infra_changed=${infra_changed}"
             echo "job=$(job_name "${TARGET}")"
           } >> "${GITHUB_OUTPUT}"
 
@@ -110,6 +122,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
       - name: Verify image
+        if: steps.record.outputs.image_changed == 'true'
         env:
           BUILD: ${{ steps.record.outputs.build }}
           COMMIT: ${{ steps.record.outputs.commit }}
@@ -122,13 +135,50 @@ jobs:
           grep -qx "${COMMIT}" <<< "${tags}" \
             || { echo "::error::${IMAGE} was not built from ${COMMIT}"; exit 1; }
 
+      # Infrastructure first: the new image may need it.
+      - name: Checkout the infrastructure
+        if: steps.record.outputs.infra_changed == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.record.outputs.infra }}
+          path: infra-src
+          persist-credentials: false
+
+      - name: Read ${{ matrix.env }} Terraform settings
+        id: tf
+        if: steps.record.outputs.infra_changed == 'true'
+        run: bash .github/scripts/terraform-env.sh "${TARGET}" sa-terraform >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate to ${{ matrix.env }} (Terraform)
+        if: steps.record.outputs.infra_changed == 'true'
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ steps.tf.outputs.provider }}
+          service_account: ${{ steps.tf.outputs.service_account }}
+
+      - name: Set up Terraform
+        if: steps.record.outputs.infra_changed == 'true'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Apply the infrastructure
+        if: steps.record.outputs.infra_changed == 'true'
+        working-directory: infra-src/terraform
+        run: |
+          source "${GITHUB_WORKSPACE}/.github/scripts/terraform.sh"
+          tf_apply "${TARGET}" false
+
       - name: Authenticate to ${{ matrix.env }}
+        if: steps.record.outputs.image_changed == 'true'
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SA }}
 
       - name: Update Cloud Run Job
+        if: steps.record.outputs.image_changed == 'true'
         env:
           IMAGE: ${{ steps.record.outputs.image }}
           JOB_NAME: ${{ steps.record.outputs.job }}
@@ -143,12 +193,14 @@ jobs:
       # the env now runs (kept by cleanup); the candidate tag is no longer
       # needed.
       - name: Authenticate to the registry (tags)
+        if: steps.record.outputs.image_changed == 'true'
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ vars.REGISTRY_WIF_PROVIDER }}
           service_account: ${{ vars.REGISTRY_DEPLOY_SA }}
 
       - name: Update tags
+        if: steps.record.outputs.image_changed == 'true'
         env:
           BUILD: ${{ steps.record.outputs.build }}
           IMAGE: ${{ steps.record.outputs.image }}
@@ -163,10 +215,22 @@ jobs:
           COMMIT: ${{ steps.record.outputs.commit }}
           IMAGE: ${{ steps.record.outputs.image }}
           JOB_NAME: ${{ steps.record.outputs.job }}
+          IMAGE_CHANGED: ${{ steps.record.outputs.image_changed }}
+          INFRA: ${{ steps.record.outputs.infra }}
+          INFRA_CHANGED: ${{ steps.record.outputs.infra_changed }}
         run: |
           {
-            echo "### Build ${BUILD} deployed to ${TARGET}"
+            if [ "${IMAGE_CHANGED}" = "true" ]; then
+              echo "### Build ${BUILD} deployed to ${TARGET}"
+            else
+              echo "### ${TARGET}: image unchanged (build ${BUILD})"
+            fi
             echo "- Job: \`${JOB_NAME}\`"
             echo "- Commit: \`${COMMIT}\`"
             echo "- Image: \`${IMAGE}\`"
+            if [ "${INFRA_CHANGED}" = "true" ]; then
+              echo "- Infrastructure: applied \`terraform/\` at \`${INFRA::7}\`"
+            else
+              echo "- Infrastructure: unchanged"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"

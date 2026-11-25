@@ -3,7 +3,8 @@ name: Promotion check
 # Runs on every PR to main (so it can be a required check). PRs that don't
 # touch deploy/ pass straight away. A promotion PR must change exactly one
 # deploy/<env>.json and nothing else, point at a build of main from dev's
-# registry, and follow the order dev -> test -> stage -> prod.
+# registry, follow the order dev -> test -> stage -> prod, and move the
+# environment's infrastructure only forward (not at all in a rollback).
 #
 # Promotion PRs opened by promote.yaml start this check with
 # workflow_dispatch (GITHUB_TOKEN can't trigger pull_request workflows).
@@ -59,16 +60,39 @@ jobs:
 
           build="$(jq -r .build "${file}")"
           commit="$(jq -r .commit "${file}")"
+          image="$(jq -r .image "${file}")"
+          infra="$(jq -r '.infra // empty' "${file}")"
           git merge-base --is-ancestor "${commit}" origin/main \
             || { echo "::error::Commit ${commit} isn't on main"; exit 1; }
+          if [ -n "${infra}" ]; then
+            git merge-base --is-ancestor "${infra}" origin/main \
+              || { echo "::error::Infrastructure commit ${infra} isn't on main"; exit 1; }
+          fi
 
-          # Stage and prod only take what the previous environment runs, or
-          # roll back to an image they ran before. (Test takes any build
+          # What the environment has now, on main.
+          old="$(git show "origin/main:${file}" 2>/dev/null)" || old='{}'
+          old_commit="$(jq -r '.commit // empty' <<< "${old}")"
+          old_image="$(jq -r '.image // empty' <<< "${old}")"
+          old_infra="$(jq -r '.infra // empty' <<< "${old}")"
+
+          # A rollback (an earlier build) changes the image only. Otherwise
+          # infrastructure only moves forward along main.
+          if [ -n "${old_commit}" ] && ! git merge-base --is-ancestor "${old_commit}" "${commit}"; then
+            [ "${infra}" = "${old_infra}" ] \
+              || { echo "::error::A rollback changes only the image; leave \"infra\" as it is (${old_infra:-not set})"; exit 1; }
+          elif [ -n "${old_infra}" ]; then
+            [ -n "${infra}" ] && git merge-base --is-ancestor "${old_infra}" "${infra}" \
+              || { echo "::error::Infrastructure can only move forward along main (now ${old_infra::7})"; exit 1; }
+          fi
+          [ "${image}" != "${old_image}" ] || [ "${infra}" != "${old_infra}" ] \
+            || { echo "::error::Nothing changes for ${target}"; exit 1; }
+
+          # Stage and prod only take the image the previous environment runs,
+          # or roll back to an image they ran before. (Test takes any build
           # that reached dev; that is checked when the PR is created and
           # again before deploying.)
           from="$(previous_env "${target}")"
-          image="$(jq -r .image "${file}")"
-          if [ "${from}" != "dev" ]; then
+          if [ "${from}" != "dev" ] && [ "${image}" != "${old_image}" ]; then
             source_image="$(git show "origin/main:deploy/${from}.json" 2>/dev/null | jq -r .image)" || true
             if [ "${source_image}" != "${image}" ] && ! ran_before "${target}" "${image}" origin/main; then
               echo "::error::${target} can only get the build ${from} runs, or roll back to a build it ran before"
@@ -76,7 +100,7 @@ jobs:
             fi
           fi
 
-          echo "OK: build ${build} (${commit::7}) to ${target}"
+          echo "OK: build ${build} (${commit::7}), infrastructure ${infra:-unchanged/not set} to ${target}"
 
   # Closed without merging: the build no longer needs protecting.
   release-candidate:

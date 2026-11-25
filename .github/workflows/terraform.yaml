@@ -1,34 +1,39 @@
 name: Terraform
 
-# Infrastructure goes through PRs, like code:
-#   pull request  plan for every environment, posted as a PR comment
+# Infrastructure changes go through PRs, like code, and reach each
+# environment the same way code does:
+#   pull request  plan for every environment, posted as PR comments
 #                 (read-only: sa-terraform-plan, no state lock)
-#   merge         apply dev -> test -> stage, in that order; each waits for
-#                 the approval its GitHub environment asks for, and stops if
-#                 the one before failed
-#   Run workflow  apply one environment again (e.g. after fixing access),
-#                 or apply a plan that destroys resources ("allow destroy")
+#   merge         apply dev (like the dev build). Test, stage and prod get
+#                 the change with their next promotion PR (promote.yaml):
+#                 its plan is shown on that PR and applied when it merges.
+#   Run workflow  repair only: apply one environment again, at the
+#                 infrastructure it has: dev main, test/stage the "infra"
+#                 commit recorded in deploy/<env>.json (e.g. after fixing
+#                 access, or "allow destroy" when a promotion's apply stopped)
 #
 # Each environment needs terraform/bootstrap.sh once, and an entry in
-# .github/terraform-envs.json. To add one: also add it to the matrix, the
-# choice list and an apply job below.
+# .github/terraform-envs.json. To add one: also add it to the plan matrix
+# and the choice list below.
 on:
   pull_request:
     branches: [main]
     paths:
       - "terraform/**"
       - ".github/terraform-envs.json"
+      - ".github/scripts/terraform*.sh"
       - ".github/workflows/terraform*.yaml"
   push:
     branches: [main]
     paths:
       - "terraform/**"
       - ".github/terraform-envs.json"
+      - ".github/scripts/terraform*.sh"
       - ".github/workflows/terraform*.yaml"
   workflow_dispatch:
     inputs:
       environment:
-        description: Environment to apply
+        description: Environment to apply again (at its recorded infrastructure)
         type: choice
         options: [dev, test, stage]
       allow_destroy:
@@ -42,7 +47,7 @@ permissions:
   pull-requests: write
 
 env:
-  # Keep in step with terraform-apply.yaml.
+  # Keep in step with terraform-apply.yaml, promote.yaml and deploy.yaml.
   TERRAFORM_VERSION: "1.17.0"
 
 jobs:
@@ -91,8 +96,11 @@ jobs:
       - name: Check sign-in
         if: steps.auth.outcome != 'success'
         run: |
-          echo "::error::Can't sign in to ${TARGET} as sa-terraform-plan. Has terraform/bootstrap.sh run there? (test only accepts pull request runs once this pipeline's first change is applied.)"
+          echo "::error::Can't sign in to ${TARGET} as sa-terraform-plan. Has terraform/bootstrap.sh run there?"
           exit 1
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -100,45 +108,14 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
-
-      # A new environment has no state until its first apply, and creating it
-      # takes a lock this read-only identity can't write. Plan it against an
-      # empty local state instead: the same plan the first apply will make.
-      - name: Init
-        run: |
-          bucket="$(sed -n 's/^bucket *= *"\(.*\)"/\1/p' "envs/${TARGET}.backend.hcl")"
-          prefix="$(sed -n 's/^prefix *= *"\(.*\)"/\1/p' "envs/${TARGET}.backend.hcl")"
-          if ! listing="$(gcloud storage ls "gs://${bucket}/**" 2>&1)"; then
-            grep -q "matched no objects" <<< "${listing}" \
-              || { echo "::error::Can't read gs://${bucket}: ${listing}"; exit 1; }
-            listing=""
-          fi
-          if grep -qx "gs://${bucket}/${prefix}/default.tfstate" <<< "${listing}"; then
-            terraform init -input=false -reconfigure "-backend-config=envs/${TARGET}.backend.hcl"
-          else
-            echo "::notice::No Terraform state for ${TARGET} yet: planning it as a new environment."
-            printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
-            terraform init -input=false
-          fi
-
-      # Read-only identity: it can't take the state lock, and doesn't need to.
       - name: Plan
         id: plan
         run: |
-          set +e
-          terraform plan -input=false -lock=false -no-color \
-            "-var-file=envs/${TARGET}.tfvars" -out=tfplan > plan.log 2>&1
-          rc=$?
-          set -e
-          if [ "${rc}" -eq 0 ]; then
-            terraform show -no-color tfplan > plan.txt
-            terraform show -json tfplan > plan.json
-            echo "ok=true" >> "${GITHUB_OUTPUT}"
+          source ../.github/scripts/terraform.sh
+          if tf_plan_readonly "${TARGET}"; then
+            echo "ok=ok" >> "${GITHUB_OUTPUT}"
           else
-            cp plan.log plan.txt
-            echo "ok=false" >> "${GITHUB_OUTPUT}"
+            echo "ok=failed" >> "${GITHUB_OUTPUT}"
           fi
           cat plan.txt
 
@@ -148,88 +125,60 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          marker="<!-- terraform-plan:${TARGET} -->"
-          if [ "${OK}" = "true" ]; then
-            summary="$(grep -E '^(Plan:|No changes\.)' plan.txt | head -1)" || true
-            destroys="$(bash ../.github/scripts/terraform-destroys.sh plan.json)"
+          source ../.github/scripts/terraform.sh
+          if [ "${TARGET}" = "dev" ]; then
+            when="applied to dev when this PR is merged"
           else
-            summary="❌ Plan failed"
-            destroys=""
+            when="applied to ${TARGET} with its next promotion PR"
           fi
-          {
-            echo "${marker}"
-            echo "### Terraform plan: ${TARGET}"
-            echo ""
-            echo "**${summary:-See the plan}** (commit ${SHA::7}, [run](${RUN_URL}))"
-            if [ -n "${destroys}" ]; then
-              echo ""
-              echo "⚠️ **Destroys or replaces:**"
-              sed 's/^/- `/; s/$/`/' <<< "${destroys}"
-              echo ""
-              echo "The apply after merge stops on these; see CICD.md (allow destroy)."
-            fi
-            echo ""
-            echo "<details><summary>Show plan</summary>"
-            echo ""
-            echo '```'
-            head -c 60000 plan.txt
-            if [ "$(wc -c < plan.txt)" -gt 60000 ]; then
-              echo ""
-              echo "... cut off; the full plan is in the run log."
-            fi
-            echo '```'
-            echo "</details>"
-          } > comment.md
+          tf_plan_markdown "${TARGET}" "${OK}" "Terraform plan: ${TARGET}" \
+            "${when}; commit ${SHA::7}, [run](${RUN_URL})" > comment.md
           cp comment.md "${GITHUB_STEP_SUMMARY}"
-
-          id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-            --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -1)" || true
-          if [ -n "${id}" ]; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -F body=@comment.md > /dev/null
-          else
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@comment.md > /dev/null
-          fi
+          tf_post_comment "${PR}" "${TARGET}" comment.md
 
       - name: Fail if the plan failed
-        if: steps.plan.outputs.ok != 'true'
+        if: steps.plan.outputs.ok != 'ok'
         run: exit 1
 
-  apply-dev:
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || inputs.environment == 'dev')
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/terraform-apply.yaml
-    with:
-      environment: dev
-      allow_destroy: ${{ inputs.allow_destroy == true }}
+  # Merge: dev at main. Run workflow: the chosen environment at the
+  # infrastructure it has (main if nothing is recorded yet).
+  resolve:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      environment: ${{ steps.ref.outputs.environment }}
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-  apply-test:
-    needs: apply-dev
-    if: >-
-      !cancelled() && github.ref == 'refs/heads/main' &&
-      ((github.event_name == 'push' && needs.apply-dev.result == 'success') ||
-       (github.event_name == 'workflow_dispatch' && inputs.environment == 'test'))
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/terraform-apply.yaml
-    with:
-      environment: test
-      allow_destroy: ${{ inputs.allow_destroy == true }}
+      - name: Which infrastructure
+        id: ref
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_ENV: ${{ inputs.environment }}
+        run: |
+          env="dev"
+          [ "${EVENT}" = "push" ] || env="${INPUT_ENV}"
+          ref="${GITHUB_SHA}"
+          if [ "${env}" != "dev" ] && [ -f "deploy/${env}.json" ]; then
+            recorded="$(jq -r '.infra // empty' "deploy/${env}.json")"
+            ref="${recorded:-${GITHUB_SHA}}"
+          fi
+          echo "environment=${env}" >> "${GITHUB_OUTPUT}"
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+          echo "Applying ${env} at ${ref::7}" >> "${GITHUB_STEP_SUMMARY}"
 
-  apply-stage:
-    needs: apply-test
-    if: >-
-      !cancelled() && github.ref == 'refs/heads/main' &&
-      ((github.event_name == 'push' && needs.apply-test.result == 'success') ||
-       (github.event_name == 'workflow_dispatch' && inputs.environment == 'stage'))
+  apply:
+    needs: resolve
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/terraform-apply.yaml
     with:
-      environment: stage
+      environment: ${{ needs.resolve.outputs.environment }}
+      ref: ${{ needs.resolve.outputs.ref }}
       allow_destroy: ${{ inputs.allow_destroy == true }}

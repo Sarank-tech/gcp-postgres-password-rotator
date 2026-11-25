@@ -164,7 +164,8 @@ Full detail in [CICD.md](CICD.md). In short:
 
 - **PR preview** (optional): a PR labelled `deploy-dev` is built as
   `pr-rotator:pr-<n>-<sha>` and deployed to dev on every push, before review.
-- **Merge to `main`**: `build.yaml` builds the image once as **build N**,
+- **Merge to `main`**: `build.yaml` builds the newest commit of `main` once
+  as **build N** (highest `build-<n>` in the registry + 1),
   pushes `rotator:<sha>` to dev's registry, points dev's job at the digest,
   then tags it `build-N`, `latest` and `deployed-dev`.
 - **Promotion**: the *Create promotion PR* button opens a PR changing only

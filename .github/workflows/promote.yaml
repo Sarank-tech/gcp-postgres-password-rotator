@@ -92,11 +92,11 @@ jobs:
 
           if [ "${from}" = "dev" ]; then
             # Any build that reached dev; build-<n> tags are added after the
-            # dev deploy succeeds.
+            # dev deploy succeeds. Empty: the highest build number.
             if [ -n "${BUILD_INPUT}" ]; then
               build="${BUILD_INPUT}"
             else
-              build="$(image_tags "${image}" "$(tag_digest "${image}" latest)" | sed -n 's/^build-\([0-9]*\)$/\1/p' | head -1)" || true
+              build="$(all_tags "${image}" | sed -n 's/^build-\([0-9]*\) .*/\1/p' | sort -n | tail -1)" || true
             fi
             [[ "${build}" =~ ^[0-9]+$ ]] || { echo "::error::No build found to promote"; exit 1; }
             digest="$(tag_digest "${image}" "build-${build}")" || true
@@ -139,6 +139,11 @@ jobs:
               || { echo "::error::${TARGET} already runs build ${build}, and its infrastructure is up to date"; exit 1; }
             kind=infra
           elif [ -n "${current_commit}" ] && ! git merge-base --is-ancestor "${current_commit}" "${commit}"; then
+            # Going back only when asked for by number.
+            [ -n "${BUILD_INPUT}" ] || {
+              echo "::error::Build ${build} is older than build ${current_build}, which ${TARGET} runs. To roll back, enter the build number."
+              exit 1
+            }
             kind=rollback
           else
             kind=promotion

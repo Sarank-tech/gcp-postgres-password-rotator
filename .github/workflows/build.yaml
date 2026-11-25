@@ -5,7 +5,12 @@ name: Build and deploy to dev
 # image later through promotion PRs (promote.yaml), never a rebuild.
 #
 # Merges that only change deploy/ (promotions), Terraform (terraform.yaml
-# applies it) or docs don't build.
+# applies it) or docs don't build. Only the newest commit of main is built:
+# a run for an older commit (a re-run, or a merge overtaken by the next one)
+# is skipped, so "latest" never moves back.
+#
+# Build numbers come from the registry (highest build-<n> + 1), not from the
+# run counter, so they stay unique even if this file is renamed or copied.
 on:
   push:
     branches: [main]
@@ -24,7 +29,28 @@ permissions:
   id-token: write
 
 jobs:
+  newest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      newest: ${{ steps.main.outputs.newest }}
+    steps:
+      - name: Is this the newest commit of main?
+        id: main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ] && [ "${head}" = "${GITHUB_SHA}" ]; then
+            echo "newest=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "newest=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Skipped: ${GITHUB_SHA::7} on ${GITHUB_REF_NAME} isn't the newest commit of main (${head::7}); only that one is built."
+          fi
+
   dev:
+    needs: newest
+    if: needs.newest.outputs.newest == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: dev
@@ -42,7 +68,6 @@ jobs:
       REGISTRY: ${{ vars.REGION }}-docker.pkg.dev
       IMAGE: ${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/rotator-repo/rotator
       JOB_NAME: postgres-password-rotator-dev
-      BUILD: ${{ github.run_number }}
 
     steps:
       - name: Check environment variables
@@ -69,6 +94,23 @@ jobs:
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      # Highest build-<n> in the registry + 1 (1 for an empty registry). A
+      # build that fails before dev runs it gets no build-<n> tag, so its
+      # number is used again by the next build.
+      - name: Pick the build number
+        run: |
+          source .github/scripts/promotion.sh
+          # Fails (rather than starting again at 1) if the registry can't be read.
+          packages="$(gcloud artifacts packages list --repository=rotator-repo \
+            --location="${REGION}" --project="${PROJECT_ID}" --format="value(name.basename())")"
+          last=0
+          if grep -qx rotator <<< "${packages}"; then
+            tags="$(all_tags "${IMAGE}")"
+            last="$(sed -n 's/^build-\([0-9]*\) .*/\1/p' <<< "${tags}" | sort -n | tail -1)"
+          fi
+          echo "BUILD=$(( ${last:-0} + 1 ))" >> "${GITHUB_ENV}"
+          echo "Build number: $(( ${last:-0} + 1 ))"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "${REGISTRY}" --quiet

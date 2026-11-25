@@ -79,11 +79,21 @@ The PR needs an approval from a code owner (`.github/CODEOWNERS`) and a
 passing **promotion-check**. Merging builds **build N** once and deploys it
 to dev. The run summary shows the build number.
 
+Build numbers come from the registry: the highest `build-<n>` tag plus one
+(1 in an empty registry), not the run counter, so renaming or copying the
+workflow file can't reuse numbers. Only the newest commit of `main` is
+built: re-running an older run, or a merge overtaken by the next merge, is
+skipped (the run shows a notice), so `latest` never moves back. A build that
+fails before dev runs it gets no `build-<n>` tag; the next build reuses its
+number.
+
 ### 3. Promote to test (and later stage, prod)
 
 1. **Actions → Create promotion PR → Run workflow**, from `main`.
 2. Pick the environment. For test, leave *Build number* empty for the newest
-   build in dev, or enter an earlier one. Stage and prod always get what the
+   build in dev (the highest number), or enter an earlier one. Empty never
+   moves an environment to an older build than it runs: rolling back needs
+   the build number. Stage and prod always get what the
    previous environment runs.
 3. A PR opens, titled for example
    `Promote build 142 to test — Disable previous secret versions`. Its
@@ -348,6 +358,9 @@ don't apply it.
 | Preview job doesn't start | Label isn't exactly `deploy-dev`, or the PR comes from a fork |
 | Preview fails at authentication | Dev's Terraform not applied with `github_allow_pull_requests = true`, or dev's deployment branches restricted to `main` |
 | Promotion button fails "create pull requests" | *Allow GitHub Actions to create and approve pull requests* not ticked |
+| Build and deploy to dev: `Skipped: … isn't the newest commit of main` | Expected: a newer merge (or a re-run of an old run). Only the newest commit is built; check that commit's run |
+| Create promotion PR: `Build N is older than build M, which <env> runs` | The newest build is older than what the environment runs. To roll back, enter the build number; otherwise merge to `main` to make a newer build |
+| Two runs of the same workflow for one merge | A copied workflow file (e.g. `deploy copy.yaml`). Delete the copy; approve only the run of the original file |
 | Promotion PR can't be merged, check pending | Re-run **Promotion check** on the PR's branch (Actions → Promotion check → Run workflow → branch `promote/...`) |
 | `is not build N (missing, or cleaned up)` | The build was cleaned up before it was promoted; promote a newer one |
 | `can only get the build <env> runs` | Stage/prod promotion of a build the previous environment doesn't run |

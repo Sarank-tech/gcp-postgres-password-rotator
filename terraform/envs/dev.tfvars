@@ -33,3 +33,7 @@ image_reader_projects = {
   "ingka-dp-sap-stage" = "47183561456"
   "ingka-dp-sap-prod"  = "611626251799"
 }
+
+# Scheduled rotation is off for now: run the job by hand. Set false to rotate
+# on the schedule (default 00:00 UTC on 1 Jan/Apr/Jul/Oct).
+schedule_paused = true

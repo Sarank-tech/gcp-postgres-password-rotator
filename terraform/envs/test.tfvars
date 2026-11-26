@@ -26,3 +26,7 @@ vpc_connector_cidr = "10.8.0.0/28"
 
 # Runs the image from dev's registry; no registry of its own.
 create_artifact_registry = false
+
+# Scheduled rotation is off for now: run the job by hand. Set false to rotate
+# on the schedule (default 00:00 UTC on 1 Jan/Apr/Jul/Oct).
+schedule_paused = true

@@ -248,6 +248,14 @@ gcloud run jobs execute postgres-password-rotator-<env> \
   --region=europe-west1 --project=<project> --wait
 ```
 
+**Schedule:** the scheduler trigger is **paused in every environment**
+(`schedule_paused = true` in `terraform/envs/<env>.tfvars`), so rotations
+only happen when the job is run as above. To turn scheduled rotation on for
+an environment, set `schedule_paused = false` in its tfvars in a PR: dev
+gets it on merge, the others with their next promotion (or "Apply
+infrastructure changes"). Resuming it by hand in the console works too, but
+the next Terraform apply pauses it again.
+
 Logs are in Cloud Logging under resource type `cloud_run_job`, one JSON entry
 per step, with fields `db_user`, `secret_id` and `step`. Passwords are never
 logged.

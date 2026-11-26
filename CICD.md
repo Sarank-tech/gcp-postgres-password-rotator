@@ -48,7 +48,7 @@ flowchart LR
 | dev | `ingka-dp-sap-dev` | Every merge to `main` (automatic), or a PR preview | Live |
 | test | `ingka-dp-sap-test` | Merging a "Promote build N to test" PR | Live |
 | stage | `ingka-dp-sap-stage` | Merging a "Promote build N to stage" PR | Live |
-| prod | _tbd_ | Merging a "Promote build N to prod" PR | Not set up |
+| prod | `ingka-dp-sap-prod` | Merging a "Promote build N to prod" PR | Being set up (Terraform; promotions not enabled yet) |
 
 Each environment has its own GCP project, Terraform state bucket
 (`mdm-postgrespwd-tfstate-<env>`), Workload Identity pool, service accounts

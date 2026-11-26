@@ -35,7 +35,7 @@ on:
       environment:
         description: Environment to apply again (at its recorded infrastructure)
         type: choice
-        options: [dev, test, stage]
+        options: [dev, test, stage, prod]
       allow_destroy:
         description: Allow a plan that destroys or replaces resources
         type: boolean
@@ -57,7 +57,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       matrix:
-        env: [dev, test, stage]
+        env: [dev, test, stage, prod]
       fail-fast: false
     runs-on: ubuntu-latest
     timeout-minutes: 15

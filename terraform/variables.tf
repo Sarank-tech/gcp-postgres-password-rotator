@@ -179,6 +179,12 @@ variable "schedule_cron" {
   default     = "0 0 1 */3 *"
 }
 
+variable "schedule_paused" {
+  description = "Keep the scheduler trigger paused (rotations only when the job is run by hand). Set false to rotate on schedule_cron."
+  type        = bool
+  default     = true
+}
+
 variable "schedule_time_zone" {
   description = "Time zone for the scheduler cron."
   type        = string

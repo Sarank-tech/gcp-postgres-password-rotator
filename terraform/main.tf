@@ -486,6 +486,7 @@ resource "google_cloud_scheduler_job" "rotator_trigger" {
   description = "Triggers ${local.job_name} (~every 90 days)"
   schedule    = var.schedule_cron
   time_zone   = var.schedule_time_zone
+  paused      = var.schedule_paused
 
   retry_config {
     retry_count = 1

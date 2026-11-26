@@ -31,4 +31,5 @@ vpc_connector_cidr = "10.3.0.0/28"
 image_reader_projects = {
   "ingka-dp-sap-test"  = "1051284681247"
   "ingka-dp-sap-stage" = "47183561456"
+  "ingka-dp-sap-prod"  = "611626251799"
 }

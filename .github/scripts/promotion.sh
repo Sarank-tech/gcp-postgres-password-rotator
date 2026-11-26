@@ -5,7 +5,7 @@
 # apply its Terraform.
 
 # Environments that can be promoted to, in order.
-PROMOTION_ENVS="test stage"
+PROMOTION_ENVS="test stage prod"
 
 # The environment a build must come from before reaching $1.
 previous_env() {

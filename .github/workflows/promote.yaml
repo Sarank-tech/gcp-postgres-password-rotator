@@ -25,7 +25,7 @@ on:
         description: Environment to promote to
         type: choice
         # Add prod here when it exists (and in promotion.sh).
-        options: [test, stage]
+        options: [test, stage, prod]
       build:
         description: "Build number. Empty: newest in dev (test), or what the previous env runs. Earlier build: rollback. The build it runs now: infrastructure only"
         type: string
